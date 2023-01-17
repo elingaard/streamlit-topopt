@@ -31,7 +31,9 @@ def build_cone_filter(rmin: float, size: tuple) -> Tuple[np.ndarray, np.ndarray]
 
 
 class ComplianceTopOpt(ABC):
-    def __init__(self, mesh, fea, volfrac, penal, max_iter, min_change, move_limit) -> None:
+    def __init__(
+        self, mesh, fea, volfrac, penal, max_iter, min_change, move_limit
+    ) -> None:
         self.mesh = mesh
         self.fea = fea
         self.volfrac = volfrac
@@ -39,6 +41,11 @@ class ComplianceTopOpt(ABC):
         self.max_iter = max_iter
         self.min_change = min_change
         self.move_limit = move_limit
+        self.rho = np.ones((self.mesh.nely, self.mesh.nelx)) * self.volfrac
+        self.rho_phys = self.rho.copy()
+        disp = self.fea.solve_(self.rho_phys, self.penal, sparse=True, unit_load=True)
+        self.comp, _ = self.eval_compliance(disp)
+        self.iter = 0
 
     def elementwise_compliance(self, u):
         ce = np.sum(
@@ -48,111 +55,99 @@ class ComplianceTopOpt(ABC):
         ce = ce.reshape((self.mesh.nely, self.mesh.nelx), order="F")
         return ce
 
-    def eval_compliance(self, x_phys, u):
+    def eval_compliance(self, u):
         ce = self.elementwise_compliance(u)
         comp = np.sum(
-            self.fea.Emin + x_phys**2 * (self.fea.Emax - self.fea.Emin) * ce
+            self.fea.Emin + self.rho_phys**2 * (self.fea.Emax - self.fea.Emin) * ce
         )
         return comp, ce
 
-    def eval_vol_constraint(self, x_phys):
-        vol_diff = (np.sum(x_phys) / self.mesh.nele) - self.volfrac
+    def eval_vol_constraint(self):
+        vol_diff = (np.sum(self.rho_phys) / self.mesh.nele) - self.volfrac
         return vol_diff
 
-    def eval_sensitivities(self, x_phys, ce):
+    def eval_sensitivities(self, ce):
         dc = (
             -self.penal
             * (self.fea.Emax - self.fea.Emin)
-            * x_phys ** (self.penal - 1)
+            * self.rho_phys ** (self.penal - 1)
             * ce
         )
         dc -= 1e-9  # for numerical stability
         dv = np.ones((self.mesh.nely, self.mesh.nelx))
         return dc, dv
 
-    def bisect(self, x, dc, dv):
+    def bisect(self, dc, dv):
         l1 = 1e-9
         l2 = 1e9
         while (l2 - l1) / (l1 + l2) > 1e-3:
             lmid = 0.5 * (l2 + l1)
             B_K = np.sqrt(-dc / dv / lmid)
             # generate new design using optimality criteria
-            fixpoint = np.minimum(1.0, np.minimum(x + self.move_limit, x * B_K))
-            x_new = np.maximum(0.0, np.maximum(x - self.move_limit, fixpoint))
-            x_phys = self.apply_design_filter(x_new)
-            vol_diff = self.eval_vol_constraint(x_phys)
+            fixpoint = np.minimum(
+                1.0, np.minimum(self.rho + self.move_limit, self.rho * B_K)
+            )
+            rho_new = np.maximum(0.0, np.maximum(self.rho - self.move_limit, fixpoint))
+            self.rho_phys = self.apply_design_filter(rho_new)
+            vol_diff = self.eval_vol_constraint()
             if vol_diff > 0:
                 l1 = lmid
             else:
                 l2 = lmid
 
-        return x_new, x_phys
+        return rho_new
 
     @abstractmethod
-    def apply_design_filter(self, x):
-        return x
-
-    @abstractmethod
-    def apply_sensitivity_filter(self, x, dc, dv):
-        return x
-
-    @abstractmethod
-    def step(self):
+    def apply_design_filter(self):
         pass
 
-    def run(self):
-        max_rho_change = self.min_change + 1e9
-        while self.min_change < max_rho_change and self.max_iter > self.iter:
-            comp, max_rho_change = self.step()
+    @abstractmethod
+    def apply_sensitivity_filter(self):
+        pass
 
-        return comp
+    def step(self):
+        disp = self.fea.solve_(self.rho_phys, self.penal, sparse=True, unit_load=True)
+        comp, ce = self.eval_compliance(disp)
+        dc, dv = self.eval_sensitivities(ce)
+        dc, dv = self.apply_sensitivity_filter(dc, dv)
+        rho_new = self.bisect(dc, dv)
+
+        self.max_rho_change = np.max(np.abs(rho_new - self.rho))
+        self.rho = rho_new.copy()
+        self.comp = comp
+        self.iter += 1
+
+    def run(self):
+        self.step()
+        while self.max_rho_change > self.min_change and self.iter < self.max_iter:
+            self.step()
 
 
 class SensitivityFilterTopOpt(ComplianceTopOpt):
     def __init__(self, rmin, **kwargs):
         super().__init__(**kwargs)
         self.rmin = rmin
-        self.rho = np.ones((self.mesh.nely, self.mesh.nelx)) * self.volfrac
-        self.rho_phys = self.rho.copy()
         self.filter_kernel, self.kernel_sums = build_cone_filter(
             rmin, (self.mesh.nely, self.mesh.nelx)
         )
-        self.iter = 0
 
     def apply_design_filter(self, x):
         x_phys = x.copy()
         return x_phys
 
-    def apply_sensitivity_filter(self, x_phys, dc, dv):
-        dc = convolve(dc * x_phys, self.filter_kernel, mode="constant", cval=0)
-        dc = dc / self.kernel_sums / np.maximum(1e-3, x_phys)
+    def apply_sensitivity_filter(self, dc, dv):
+        dc = convolve(dc * self.rho_phys, self.filter_kernel, mode="constant", cval=0)
+        dc = dc / self.kernel_sums / np.maximum(1e-3, self.rho_phys)
         return dc, dv
-
-    def step(self):
-        disp = self.fea.solve_(self.rho_phys, self.penal, sparse=True, unit_load=True)
-        comp, ce = self.eval_compliance(self.rho, disp)
-        dc, dv = self.eval_sensitivities(self.rho_phys, ce)
-        dc, dv = self.apply_sensitivity_filter(self.rho_phys, dc, dv)
-        rho_new, self.rho_phys = self.bisect(self.rho, dc, dv)
-
-        max_rho_change = np.max(np.abs(rho_new - self.rho))
-        self.rho = rho_new.copy()
-
-        self.iter += 1
-
-        return comp, max_rho_change
 
 
 class DensityFilterTopOpt(ComplianceTopOpt):
     def __init__(self, rmin, **kwargs):
         super().__init__(**kwargs)
         self.rmin = rmin
-        self.rho = np.ones((self.mesh.nely, self.mesh.nelx)) * self.volfrac
-        self.rho_phys = self.rho.copy()
         self.filter_kernel, self.kernel_sums = build_cone_filter(
             rmin, (self.mesh.nely, self.mesh.nelx)
         )
-        self.iter = 0
 
     def apply_design_filter(self, x):
         x_phys = (
@@ -169,27 +164,12 @@ class DensityFilterTopOpt(ComplianceTopOpt):
         )
         return dc, dv
 
-    def step(self):
-        disp = self.fea.solve_(self.rho_phys, self.penal, sparse=True, unit_load=True)
-        comp, ce = self.eval_compliance(self.rho, disp)
-        dc, dv = self.eval_sensitivities(self.rho_phys, ce)
-        dc, dv = self.apply_sensitivity_filter(dc, dv)
-        rho_new, self.rho_phys = self.bisect(self.rho, dc, dv)
-
-        max_rho_change = np.max(np.abs(rho_new - self.rho))
-        self.rho = rho_new.copy()
-
-        self.iter += 1
-
-        return comp, max_rho_change
-
 
 class HeavisideFilterTopOpt(ComplianceTopOpt):
     def __init__(self, rmin, **kwargs):
         super().__init__(**kwargs)
         self.rmin = rmin
         self.beta = 1
-        self.rho = np.ones((self.mesh.nely, self.mesh.nelx)) * self.volfrac
         self.rho_tilde = self.rho.copy()
         self.rho_phys = (
             1
@@ -200,18 +180,20 @@ class HeavisideFilterTopOpt(ComplianceTopOpt):
             rmin, (self.mesh.nely, self.mesh.nelx)
         )
         self.iter_beta = 0
-        self.iter = 0
 
     def apply_design_filter(self, x):
-        x_tilde = (
+        self.rho_tilde = (
             convolve(x, self.filter_kernel, mode="constant", cval=0) / self.kernel_sums
         )
-        self.rho_tilde = x_tilde
-        x_phys = 1 - np.exp(-self.beta * x_tilde) + x_tilde * np.exp(-self.beta)
+        x_phys = (
+            1
+            - np.exp(-self.beta * self.rho_tilde)
+            + self.rho_tilde * np.exp(-self.beta)
+        )
         return x_phys
 
-    def apply_sensitivity_filter(self, x_tilde, dc, dv):
-        dx = self.beta * np.exp(-self.beta * x_tilde) + np.exp(-self.beta)
+    def apply_sensitivity_filter(self, dc, dv):
+        dx = self.beta * np.exp(-self.beta * self.rho_tilde) + np.exp(-self.beta)
         dc = convolve(
             (dc * dx) / self.kernel_sums,
             self.filter_kernel,
@@ -227,22 +209,11 @@ class HeavisideFilterTopOpt(ComplianceTopOpt):
         return dc, dv
 
     def step(self):
-        disp = self.fea.solve_(self.rho_phys, self.penal, sparse=True, unit_load=True)
-        comp, ce = self.eval_compliance(self.rho, disp)
-        dc, dv = self.eval_sensitivities(self.rho_phys, ce)
-        dc, dv = self.apply_sensitivity_filter(self.rho_tilde, dc, dv)
-        rho_new, self.rho_phys = self.bisect(self.rho, dc, dv)
-
-        max_rho_change = np.max(np.abs(rho_new - self.rho))
-        self.rho = rho_new.copy()
-
-        self.iter += 1
+        super().step()
         self.iter_beta += 1
 
         if self.beta < 512:
-            if self.iter_beta >= 50 or max_rho_change <= self.min_change:
+            if self.iter_beta >= 50 or self.max_rho_change <= self.min_change:
                 self.beta *= 2
                 self.iter_beta = 0
-                max_rho_change = self.min_change + 1e9
-
-        return comp, max_rho_change
+                self.max_rho_change = self.min_change + 1e9

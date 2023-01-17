@@ -414,16 +414,18 @@ class LinearElasticity:
         f0y_face4 = np.zeros(8)
         f0y_face4[[1, 7]] = tr22 * b
 
-        face_force_vecs = np.vstack((
-            f0x_face1,
-            f0y_face1,
-            f0x_face2,
-            f0y_face2,
-            f0x_face3,
-            f0y_face3,
-            f0x_face4,
-            f0y_face4,
-        ))
+        face_force_vecs = np.vstack(
+            (
+                f0x_face1,
+                f0y_face1,
+                f0x_face2,
+                f0y_face2,
+                f0x_face3,
+                f0y_face3,
+                f0x_face4,
+                f0y_face4,
+            )
+        )
         return face_force_vecs
 
     def pre_integrated_element_force_vectors(self) -> np.ndarray:
@@ -538,7 +540,7 @@ class LinearElasticity:
         disp(float array): displacement vector
 
         Returns:
-        epsilon_mat(3 x nely x nelx) float matrix): sigma_11, sigma_22, sigma_12
+        sigma_mat(3 x nely x nelx) float matrix): sigma_11, sigma_22, sigma_12
         """
 
         # reshape element-wise strains to matrix
@@ -582,7 +584,7 @@ class LinearElasticity:
         sigma_vm = (
             sigma_mat[0] ** 2
             + sigma_mat[1] ** 2
-            - (sigma_mat[0] * sigma_mat[1]) * (3 * sigma_mat[2] ** 2)
+            - (sigma_mat[0] * sigma_mat[1]) + (3 * sigma_mat[2] ** 2)
         )
         sigma_vm = np.sqrt(sigma_vm)
         return sigma_vm

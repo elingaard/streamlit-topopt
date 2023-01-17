@@ -2,9 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import streamlit as st
 
-
-from src.st_topopt.FEA import QuadMesh, LinearElasticity
-from src.st_topopt.topopt import (
+from st_topopt.FEA import QuadMesh, LinearElasticity
+from st_topopt.topopt import (
     SensitivityFilterTopOpt,
     DensityFilterTopOpt,
     HeavisideFilterTopOpt,
@@ -56,10 +55,26 @@ def app():
     with st.expander("FEA parameters"):
         with st.form("fea_params"):
             c1, c2, c3 = st.columns(3)
-            nelx = c1.number_input("nelx", min_value=1, max_value=1000, value=60)
-            nely = c2.number_input("nely", min_value=1, max_value=1000, value=20)
+            nelx = c1.number_input(
+                "nelx",
+                min_value=1,
+                max_value=1000,
+                value=60,
+                help="Number of elements in horizontal direction",
+            )
+            nely = c2.number_input(
+                "nely",
+                min_value=1,
+                max_value=1000,
+                value=30,
+                help="Number of elements in vertical direction",
+            )
             problem_options = ["MBB", "Bridge", "Cantilever"]
-            problem = c3.selectbox("problem", options=problem_options)
+            problem = c3.selectbox(
+                "problem",
+                options=problem_options,
+                help="Choose between different standard problems",
+            )
 
             if st.form_submit_button("Submit"):
                 del st.session_state.mesh
@@ -82,22 +97,42 @@ def app():
         with st.form("opt_params"):
             c1, c2, c3 = st.columns(3)
             volfrac = c1.number_input(
-                "Volume fraction", min_value=0.05, max_value=1.0, value=0.3
+                "Volume fraction",
+                min_value=0.05,
+                max_value=1.0,
+                value=0.3,
+                help="Volume constraint defining how much of the design domain can contain material",
             )
             dens_penal = c2.number_input(
-                "Intermediate density penalty", min_value=1.0, max_value=5.0, value=3.0
+                "Intermediate density penalty",
+                min_value=1.0,
+                max_value=5.0,
+                value=3.0,
+                help="Penalty on intermediate densities which helps force the solution towards 0 and 1. Higher means stronger enforcement",
             )
             filter_radius = c3.number_input(
-                "Filter radius", min_value=1.0, max_value=5.0, value=1.5
+                "Filter radius",
+                min_value=1.0,
+                max_value=5.0,
+                value=1.5,
+                help="Filter radius. Can also be interpreted as minimum feature size.",
             )
             max_iter = c1.number_input(
                 "Max iterations", min_value=1, max_value=10000, value=1000
             )
             min_change = c2.number_input(
-                "Min design change", min_value=0.0, max_value=1.0, value=0.01
+                "Min design change",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.01,
+                help="Convergence criteria based on minimum change in any design variable",
             )
             move_limit = c3.number_input(
-                "Move limit", min_value=0.0, max_value=1.0, value=0.2
+                "Move limit",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.2,
+                help="Maximum change of a design variable during one optimization step",
             )
             filter_options = ["Sensitivity", "Density", "Heaviside"]
             filter_type = c1.selectbox("Filter type", options=filter_options)
@@ -123,31 +158,45 @@ def app():
             topopt = DensityFilterTopOpt(**opt_params)
         elif filter_type == "Heaviside":
             topopt = HeavisideFilterTopOpt(**opt_params)
-        st.session_state["topopt"] = topopt
-
-        disp = st.session_state.fea.solve_(
-            topopt.rho_phys, dens_penal, unit_load=True, sparse=True
-        )
-        comp = fea.compute_compliance(disp)
 
         st.session_state["topopt"] = topopt
 
-    c1, c2, c3, _ = st.columns([0.15, 0.2, 0.15, 0.5])
+    st.write("**Control panel**")
+    c1, c2, c3, c4, _ = st.columns([0.15, 0.2, 0.15, 0.15, 0.35])
     step1_button = c1.button("Step ➡️")
     step10_button = c2.button("Step 10 ⏩")
     run_button = c3.button("Run ▶️")
+    reset_button = c4.button("Reset 🔄")
     if step1_button:
-        comp, _ = st.session_state.topopt.step()
+        st.session_state.topopt.step()
     elif step10_button:
         for _ in range(10):
-            comp, _ = st.session_state.topopt.step()
+            st.session_state.topopt.step()
     elif run_button:
-        comp = st.session_state.topopt.run()
+        st.session_state.topopt.run()
+    elif reset_button:
+        st.session_state.topopt = st.session_state.topopt.__class__(**opt_params)
 
     fig, ax = plt.subplots()
     ax.matshow(-st.session_state.topopt.rho_phys, cmap="gray", vmin=-1, vmax=0)
-    ax.set_title(f"Comp: {comp :.2f}, it. {st.session_state.topopt.iter}")
+    ax.set_title(
+        f"Comp: {st.session_state.topopt.comp :.2f}, it. {st.session_state.topopt.iter}"
+    )
     st.pyplot(fig)
+
+    with st.expander("Analysis"):
+        disp = st.session_state.topopt.fea.displacement
+        strain_energy_mat = st.session_state.fea.compute_strain_energy(disp)
+        fig, ax = plt.subplots()
+        im = ax.matshow(strain_energy_mat)
+        ax.set_title("Strain energy")
+        st.pyplot(fig)
+
+        sigma_vm_mat = st.session_state.fea.compute_von_mises_stresses(disp)
+        fig, ax = plt.subplots()
+        im = ax.matshow(sigma_vm_mat)
+        ax.set_title("Von Mises")
+        st.pyplot(fig)
 
 
 if __name__ == "__main__":
