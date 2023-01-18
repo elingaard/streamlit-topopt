@@ -1,57 +1,38 @@
-import numpy as np
 import matplotlib.pyplot as plt
 import streamlit as st
+from io import BytesIO
 
 from st_topopt.FEA import QuadMesh, LinearElasticity
+from st_topopt import benchmarks
 from st_topopt.topopt import (
     SensitivityFilterTopOpt,
     DensityFilterTopOpt,
     HeavisideFilterTopOpt,
 )
 
-
-def init_MBB_beam(mesh, fea):
-    # insert fixed boundary condition on left edge of the domain in x-direction
-    left_wall_nodes = np.nonzero(mesh.XY[:, 0] == 0)[0]
-    fea.insert_node_boundaries(node_ids=left_wall_nodes, axis=0)
-    # insert vertical support in lower right corner
-    fea.insert_node_boundaries(node_ids=np.array([mesh.nnodes - 1]), axis=1)
-    # insert force in the middle on the right edge extending 1/10 of the domain in
-    # y-direction
-    fea.insert_node_load(node_id=0, load_vec=(0, -1))
+MAX_FIGSIZE = 8
 
 
-def init_cantilever_beam(mesh, fea):
-    nelx, nely = (mesh.nelx, mesh.nely)
-    # insert fixed boundary condition on left edge of the domain in both directions
-    left_wall_nodes = np.nonzero(mesh.XY[:, 0] == 0)[0]
-    fea.insert_node_boundaries(node_ids=left_wall_nodes, axis=0)
-    fea.insert_node_boundaries(node_ids=left_wall_nodes, axis=1)
-    # insert force in the middle on the right edge extending 1/10 of the domain in
-    # y-direction
-    load_extent_y = 1 / 10
-    ele_extent = nely * load_extent_y / 2
-    mid_ele_right_wall = (nelx - 1) * nely + nely // 2
-    load_start_ele = int(np.floor(mid_ele_right_wall - ele_extent))
-    load_end_ele = int(np.ceil(mid_ele_right_wall + ele_extent))
-    right_wall_load_ele = np.arange(load_start_ele, load_end_ele)
-    fea.insert_face_forces(ele_ids=right_wall_load_ele, ele_face=1, load_vec=(0, -1))
+def get_figsize_from_array(arr):
+    height, width = arr.shape
+    scale_factor = max(height, width) // MAX_FIGSIZE
+    figsize = (width // scale_factor, height // scale_factor)
+    return figsize
 
 
-def init_bridge(mesh, fea):
-    nelx, nely = (mesh.nelx, mesh.nely)
-    # insert fixed boundary condition on entire lower part of the domain
-    lower_wall_nodes = np.nonzero(mesh.XY[:, 1] == nely)[0]
-    fea.insert_node_boundaries(node_ids=lower_wall_nodes, axis=0)
-    fea.insert_node_boundaries(node_ids=lower_wall_nodes, axis=1)
-    # insert distributed load across the entire upper part of the domain
-    upper_wall_eles = np.arange(0, mesh.nele, step=nely)
-    fea.insert_face_forces(ele_ids=upper_wall_eles, ele_face=0, load_vec=(0, -1))
+def matshow_to_image_buffer(mat, display_cmap=False, **kwargs):
+    figsize = get_figsize_from_array(mat)
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.matshow(mat, **kwargs)
+    if display_cmap:
+        plt.colorbar(im, ax=ax)
+    buf = BytesIO()
+    fig.tight_layout()
+    fig.savefig(buf, format="png")
+    return buf
 
 
-def app():
-    st.title("Streamlit TopOpt App")
-
+def fea_parameter_selector():
     with st.expander("FEA parameters"):
         with st.form("fea_params"):
             c1, c2, c3 = st.columns(3)
@@ -81,18 +62,10 @@ def app():
                 del st.session_state.fea
                 del st.session_state.topopt
 
-    if "mesh" or "fea" not in st.session_state:
-        mesh = QuadMesh(nelx, nely)
-        fea = LinearElasticity(mesh)
-        if problem == "MBB":
-            init_MBB_beam(mesh, fea)
-        elif problem == "Bridge":
-            init_bridge(mesh, fea)
-        elif problem == "Cantilever":
-            init_cantilever_beam()
-        st.session_state["mesh"] = mesh
-        st.session_state["fea"] = fea
+    return nelx, nely, problem
 
+
+def opt_parameter_selector():
     with st.expander("Optimization parameters"):
         with st.form("opt_params"):
             c1, c2, c3 = st.columns(3)
@@ -101,21 +74,24 @@ def app():
                 min_value=0.05,
                 max_value=1.0,
                 value=0.3,
-                help="Volume constraint defining how much of the design domain can contain material",
+                help="""Volume constraint defining how much of the design domain can 
+                contain material""",
             )
             dens_penal = c2.number_input(
                 "Intermediate density penalty",
                 min_value=1.0,
                 max_value=5.0,
                 value=3.0,
-                help="Penalty on intermediate densities which helps force the solution towards 0 and 1. Higher means stronger enforcement",
+                help="""Penalty on intermediate densities which helps force the solution 
+                towards 0 and 1. Higher means stronger enforcement""",
             )
             filter_radius = c3.number_input(
                 "Filter radius",
                 min_value=1.0,
                 max_value=5.0,
                 value=1.5,
-                help="Filter radius. Can also be interpreted as minimum feature size.",
+                help="""Filter radius. Can also be interpreted as minimum feature size.
+                """,
             )
             max_iter = c1.number_input(
                 "Max iterations", min_value=1, max_value=10000, value=1000
@@ -125,7 +101,8 @@ def app():
                 min_value=0.0,
                 max_value=1.0,
                 value=0.01,
-                help="Convergence criteria based on minimum change in any design variable",
+                help="""Convergence criteria based on minimum change in any design 
+                variable""",
             )
             move_limit = c3.number_input(
                 "Move limit",
@@ -151,17 +128,11 @@ def app():
         "rmin": filter_radius,
     }
 
-    if "topopt" not in st.session_state:
-        if filter_type == "Sensitivity":
-            topopt = SensitivityFilterTopOpt(**opt_params)
-        elif filter_type == "Density":
-            topopt = DensityFilterTopOpt(**opt_params)
-        elif filter_type == "Heaviside":
-            topopt = HeavisideFilterTopOpt(**opt_params)
+    return opt_params, filter_type
 
-        st.session_state["topopt"] = topopt
 
-    st.write("**Control panel**")
+def opt_control_panel(opt_params):
+    st.write("**Optimization control panel**")
     c1, c2, c3, c4, _ = st.columns([0.15, 0.2, 0.15, 0.15, 0.35])
     step1_button = c1.button("Step ➡️")
     step10_button = c2.button("Step 10 ⏩")
@@ -177,26 +148,76 @@ def app():
     elif reset_button:
         st.session_state.topopt = st.session_state.topopt.__class__(**opt_params)
 
-    fig, ax = plt.subplots()
-    ax.matshow(-st.session_state.topopt.rho_phys, cmap="gray", vmin=-1, vmax=0)
-    ax.set_title(
+
+def app():
+    st.title("Streamlit TopOpt App")
+
+    nelx, nely, problem = fea_parameter_selector()
+
+    if "mesh" or "fea" not in st.session_state:
+        mesh = QuadMesh(nelx, nely)
+        fea = LinearElasticity(mesh)
+        if problem == "MBB":
+            benchmarks.init_MBB_beam(mesh, fea)
+        elif problem == "Bridge":
+            benchmarks.init_bridge(mesh, fea)
+        elif problem == "Cantilever":
+            benchmarks.init_cantilever_beam()
+        st.session_state["mesh"] = mesh
+        st.session_state["fea"] = fea
+
+    opt_params, filter_type = opt_parameter_selector()
+
+    if "topopt" not in st.session_state:
+        if filter_type == "Sensitivity":
+            topopt = SensitivityFilterTopOpt(**opt_params)
+        elif filter_type == "Density":
+            topopt = DensityFilterTopOpt(**opt_params)
+        elif filter_type == "Heaviside":
+            topopt = HeavisideFilterTopOpt(**opt_params)
+
+        st.session_state["topopt"] = topopt
+
+    opt_control_panel(opt_params)
+
+    st.text(
         f"Comp: {st.session_state.topopt.comp :.2f}, it. {st.session_state.topopt.iter}"
     )
-    st.pyplot(fig)
+    rho_phys = -st.session_state.topopt.rho_phys
+    img_buf = matshow_to_image_buffer(
+        rho_phys, display_cmap=False, vmin=-1, vmax=0, cmap="gray"
+    )
+    st.image(img_buf)
 
     with st.expander("Analysis"):
-        disp = st.session_state.topopt.fea.displacement
-        strain_energy_mat = st.session_state.fea.compute_strain_energy(disp)
-        fig, ax = plt.subplots()
-        im = ax.matshow(strain_energy_mat)
-        ax.set_title("Strain energy")
-        st.pyplot(fig)
-
-        sigma_vm_mat = st.session_state.fea.compute_von_mises_stresses(disp)
-        fig, ax = plt.subplots()
-        im = ax.matshow(sigma_vm_mat)
-        ax.set_title("Von Mises")
-        st.pyplot(fig)
+        plot_type = st.radio(
+            "What do you want to plot?",
+            options=["Von Mises", "Strain energy", "Log metrics"],
+            horizontal=True,
+        )
+        if plot_type == "Strain energy":
+            disp = st.session_state.topopt.fea.displacement
+            strain_energy_mat = st.session_state.fea.compute_strain_energy(disp)
+            img_buf = matshow_to_image_buffer(strain_energy_mat, display_cmap=True)
+            st.image(img_buf, caption=plot_type)
+        elif plot_type == "Von Mises":
+            disp = st.session_state.topopt.fea.displacement
+            sigma_vm_mat = st.session_state.fea.compute_von_mises_stresses(disp)
+            img_buf = matshow_to_image_buffer(sigma_vm_mat, display_cmap=True)
+            st.image(img_buf, caption=plot_type)
+        elif plot_type == "Log metrics":
+            logger = st.session_state.topopt.logger
+            if logger.metrics:
+                metric_options = list(logger.metrics.keys())
+                metric_options.remove("iter")
+                metric_key = st.selectbox("Metric", options=metric_options)
+                fig, ax = plt.subplots()
+                ax.plot(logger.metrics["iter"], logger.metrics[metric_key], "-o")
+                ax.set_xlabel("Iter.")
+                ax.set_ylabel(metric_key)
+                st.pyplot(fig)
+            else:
+                st.info("No metrics logged yet")
 
 
 if __name__ == "__main__":
