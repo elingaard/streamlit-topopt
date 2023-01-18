@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Tuple
+from collections import defaultdict
 
 import numpy as np
 from scipy.ndimage import convolve
@@ -30,12 +31,21 @@ def build_cone_filter(rmin: float, size: tuple) -> Tuple[np.ndarray, np.ndarray]
     return cone_kernel_2d, kernel_sums
 
 
+class MetricLogger:
+    def __init__(self) -> None:
+        self.metrics = defaultdict(list)
+
+    def log_metric(self, key: str, value):
+        self.metrics[key].append(value)
+
+
 class ComplianceTopOpt(ABC):
     def __init__(
         self, mesh, fea, volfrac, penal, max_iter, min_change, move_limit
     ) -> None:
         self.mesh = mesh
         self.fea = fea
+        self.logger = MetricLogger()
         self.volfrac = volfrac
         self.penal = penal
         self.max_iter = max_iter
@@ -89,8 +99,8 @@ class ComplianceTopOpt(ABC):
             )
             rho_new = np.maximum(0.0, np.maximum(self.rho - self.move_limit, fixpoint))
             self.rho_phys = self.apply_design_filter(rho_new)
-            vol_diff = self.eval_vol_constraint()
-            if vol_diff > 0:
+            self.vol_diff = self.eval_vol_constraint()
+            if self.vol_diff > 0:
                 l1 = lmid
             else:
                 l2 = lmid
@@ -116,6 +126,11 @@ class ComplianceTopOpt(ABC):
         self.rho = rho_new.copy()
         self.comp = comp
         self.iter += 1
+
+        self.logger.log_metric("iter", self.iter)
+        self.logger.log_metric("compliance", comp)
+        self.logger.log_metric("max_rho_change", self.max_rho_change)
+        self.logger.log_metric("vol_diff", self.vol_diff)
 
     def run(self):
         self.step()
@@ -217,3 +232,6 @@ class HeavisideFilterTopOpt(ComplianceTopOpt):
                 self.beta *= 2
                 self.iter_beta = 0
                 self.max_rho_change = self.min_change + 1e9
+
+        self.logger.log_metric("iter_beta", self.iter_beta)
+        self.logger.log_metric("beta", self.beta)
