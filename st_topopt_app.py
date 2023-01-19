@@ -10,7 +10,7 @@ try:
     import st_topopt
 except ModuleNotFoundError:
     subprocess.Popen([f"{sys.executable} setup.py install"], shell=True)
-    time.sleep(90)
+    time.sleep(60) # wait for install to finish
 
 from st_topopt.FEA import QuadMesh, LinearElasticity
 from st_topopt import benchmarks
