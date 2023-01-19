@@ -1,3 +1,5 @@
+import time
+
 import matplotlib.pyplot as plt
 import streamlit as st
 from io import BytesIO
@@ -10,7 +12,7 @@ from st_topopt.topopt import (
     HeavisideFilterTopOpt,
 )
 
-MAX_FIGSIZE = 8
+MAX_FIGSIZE = 16
 
 
 def get_figsize_from_array(arr):
@@ -50,7 +52,7 @@ def fea_parameter_selector():
                 value=30,
                 help="Number of elements in vertical direction",
             )
-            problem_options = ["MBB", "Bridge", "Cantilever"]
+            problem_options = ["MBB", "Bridge", "Cantilever", "Caramel"]
             problem = c3.selectbox(
                 "problem",
                 options=problem_options,
@@ -131,7 +133,19 @@ def opt_parameter_selector():
     return opt_params, filter_type
 
 
-def opt_control_panel(opt_params):
+def design_plot(container):
+    with container.container():
+        st.text(
+            f"Comp: {st.session_state.topopt.comp :.2f}, it. {st.session_state.topopt.iter}"
+        )
+        rho_phys = -st.session_state.topopt.rho_phys
+        img_buf = matshow_to_image_buffer(
+            rho_phys, display_cmap=False, vmin=-1, vmax=0, cmap="gray"
+        )
+        st.image(img_buf)
+
+
+def opt_control_panel(opt_params, plot_container):
     st.write("**Optimization control panel**")
     c1, c2, c3, c4, _ = st.columns([0.15, 0.2, 0.15, 0.15, 0.35])
     step1_button = c1.button("Step ➡️")
@@ -144,13 +158,32 @@ def opt_control_panel(opt_params):
         for _ in range(10):
             st.session_state.topopt.step()
     elif run_button:
-        st.session_state.topopt.run()
+        topopt = st.session_state.topopt
+        topopt.step()
+        upd_time = 2.0
+        start_time = time.time()
+        st.session_state.running_opt = True
+        while (
+            topopt.max_rho_change > topopt.min_change and topopt.iter < topopt.max_iter
+        ):
+            topopt.step()
+            end_time = time.time()
+            if (end_time - start_time) > upd_time:
+                design_plot(plot_container)
+                start_time = time.time()
+        else:
+            st.success("Optimization finished!")
+            st.balloons()
+            time.sleep(2)
+            st.experimental_rerun()
     elif reset_button:
         st.session_state.topopt = st.session_state.topopt.__class__(**opt_params)
 
 
 def app():
     st.title("Streamlit TopOpt App")
+
+    st.session_state.running_opt = False
 
     nelx, nely, problem = fea_parameter_selector()
 
@@ -163,6 +196,8 @@ def app():
             benchmarks.init_bridge(mesh, fea)
         elif problem == "Cantilever":
             benchmarks.init_cantilever_beam()
+        elif problem == "Caramel":
+            benchmarks.init_caramel(mesh, fea)
         st.session_state["mesh"] = mesh
         st.session_state["fea"] = fea
 
@@ -178,16 +213,13 @@ def app():
 
         st.session_state["topopt"] = topopt
 
-    opt_control_panel(opt_params)
+    if "img_container" not in st.session_state:
+        st.session_state["img_container"] = st.container()
 
-    st.text(
-        f"Comp: {st.session_state.topopt.comp :.2f}, it. {st.session_state.topopt.iter}"
-    )
-    rho_phys = -st.session_state.topopt.rho_phys
-    img_buf = matshow_to_image_buffer(
-        rho_phys, display_cmap=False, vmin=-1, vmax=0, cmap="gray"
-    )
-    st.image(img_buf)
+    opt_container = st.empty()
+    opt_control_panel(opt_params, opt_container)
+    if st.session_state.running_opt is False:
+        design_plot(st.container())
 
     with st.expander("Analysis"):
         plot_type = st.radio(
