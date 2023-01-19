@@ -7,20 +7,6 @@ from scipy.ndimage import convolve
 
 
 def build_cone_filter(rmin: float, size: tuple) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Build a filter of the form:
-    (sum_{i in N_i} w(x_i)*y)/(sum_{i in N_i} w(x_i))
-    where N_i denotes the neighbourhood of element i
-
-    Args:
-    rmin: filter radius
-    size(tuple): tuple with array size in x- and y direction
-
-    Returns:
-    kernel(NxN array): filter kernel where M is dependent on the filter radius
-    Nsum(NxM array): sum within each neighbourhood in the filter
-    """
-
     nely, nelx = size
     cone_kernel_1d = np.arange(-np.ceil(rmin) + 1, np.ceil(rmin))
     [dy, dx] = np.meshgrid(cone_kernel_1d, cone_kernel_1d)
