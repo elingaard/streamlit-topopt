@@ -1,16 +1,22 @@
 import time
+from io import BytesIO
+import subprocess
 
 import matplotlib.pyplot as plt
 import streamlit as st
-from io import BytesIO
 
-from st_topopt.FEA import QuadMesh, LinearElasticity
-from st_topopt import benchmarks
-from st_topopt.topopt import (
-    SensitivityFilterTopOpt,
-    DensityFilterTopOpt,
-    HeavisideFilterTopOpt,
-)
+try:
+    import st_topopt
+except ImportError:
+    subprocess.call(["python", "setup.py", "install"])
+finally:
+    from st_topopt.FEA import QuadMesh, LinearElasticity
+    from st_topopt import benchmarks
+    from st_topopt.topopt import (
+        SensitivityFilterTopOpt,
+        DensityFilterTopOpt,
+        HeavisideFilterTopOpt,
+    )
 
 MAX_FIGSIZE = 16
 
