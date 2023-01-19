@@ -1,6 +1,7 @@
+import sys
+import subprocess
 import time
 from io import BytesIO
-import subprocess
 
 import matplotlib.pyplot as plt
 import streamlit as st
@@ -8,7 +9,8 @@ import streamlit as st
 try:
     import st_topopt
 except ImportError:
-    subprocess.call(["python", "setup.py", "install"])
+    subprocess.Popen([f"{sys.executable} -m pip install -e .dev "], shell=True)
+    time.sleep(90)
 finally:
     from st_topopt.FEA import QuadMesh, LinearElasticity
     from st_topopt import benchmarks
