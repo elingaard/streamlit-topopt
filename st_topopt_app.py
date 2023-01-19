@@ -9,7 +9,7 @@ import streamlit as st
 try:
     import st_topopt
 except ImportError:
-    subprocess.Popen([f"{sys.executable} -m pip install -e .dev "], shell=True)
+    subprocess.Popen([f"{sys.executable} -m pip install -e .[dev] "], shell=True)
     time.sleep(90)
 finally:
     from st_topopt.FEA import QuadMesh, LinearElasticity
