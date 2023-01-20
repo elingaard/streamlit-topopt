@@ -3,6 +3,7 @@ import subprocess
 import time
 from io import BytesIO
 
+import numpy as np
 import matplotlib.pyplot as plt
 import streamlit as st
 
@@ -10,7 +11,7 @@ try:
     import st_topopt
 except ModuleNotFoundError:
     subprocess.Popen([f"{sys.executable} setup.py install"], shell=True)
-    time.sleep(60) # wait for install to finish
+    time.sleep(60)  # wait for install to finish
 
 from st_topopt.FEA import QuadMesh, LinearElasticity
 from st_topopt import benchmarks
@@ -45,34 +46,45 @@ def matshow_to_image_buffer(mat, display_cmap=False, **kwargs):
 def fea_parameter_selector():
     with st.expander("FEA parameters"):
         with st.form("fea_params"):
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3, c4 = st.columns(4)
             nelx = c1.number_input(
                 "nelx",
                 min_value=1,
                 max_value=1000,
-                value=60,
+                value=120,
                 help="Number of elements in horizontal direction",
             )
             nely = c2.number_input(
                 "nely",
                 min_value=1,
                 max_value=1000,
-                value=30,
+                value=60,
                 help="Number of elements in vertical direction",
             )
+            solver_disp_names = {"sparse-direct": "direct", "mgcg": "iterative"}
+            solver = c3.selectbox(
+                "Solver",
+                options=["sparse-direct", "mgcg"],
+                format_func=lambda k: solver_disp_names[k],
+                help="""Use the direct solver for smaller problems and the iterative 
+                solver for larger problems """,
+            )
             problem_options = ["MBB", "Bridge", "Cantilever", "Caramel"]
-            problem = c3.selectbox(
+            problem = c4.selectbox(
                 "problem",
                 options=problem_options,
                 help="Choose between different standard problems",
             )
 
             if st.form_submit_button("Submit"):
-                del st.session_state.mesh
-                del st.session_state.fea
-                del st.session_state.topopt
+                try:
+                    del st.session_state.mesh
+                    del st.session_state.fea
+                    del st.session_state.topopt
+                except AttributeError:
+                    pass
 
-    return nelx, nely, problem
+    return nelx, nely, solver, problem
 
 
 def opt_parameter_selector():
@@ -98,13 +110,13 @@ def opt_parameter_selector():
             filter_radius = c3.number_input(
                 "Filter radius",
                 min_value=1.0,
-                max_value=5.0,
+                max_value=100.0,
                 value=1.5,
                 help="""Filter radius. Can also be interpreted as minimum feature size.
                 """,
             )
             max_iter = c1.number_input(
-                "Max iterations", min_value=1, max_value=10000, value=1000
+                "Max iterations", min_value=1, max_value=10000, value=100
             )
             min_change = c2.number_input(
                 "Min design change",
@@ -146,9 +158,9 @@ def design_plot(container):
         st.text(
             f"Comp: {st.session_state.topopt.comp :.2f}, it. {st.session_state.topopt.iter}"
         )
-        rho_phys = -st.session_state.topopt.rho_phys
+        rho_phys = st.session_state.topopt.rho_phys
         img_buf = matshow_to_image_buffer(
-            rho_phys, display_cmap=False, vmin=-1, vmax=0, cmap="gray"
+            -rho_phys, display_cmap=False, vmin=-1, vmax=0, cmap="gray"
         )
         st.image(img_buf)
 
@@ -166,24 +178,26 @@ def opt_control_panel(opt_params, plot_container):
         for _ in range(10):
             st.session_state.topopt.step()
     elif run_button:
-        topopt = st.session_state.topopt
-        topopt.step()
-        upd_time = 2.0
-        start_time = time.time()
-        st.session_state.running_opt = True
-        while (
-            topopt.max_rho_change > topopt.min_change and topopt.iter < topopt.max_iter
-        ):
+        with st.spinner("Running optimization..."):
+            topopt = st.session_state.topopt
             topopt.step()
-            end_time = time.time()
-            if (end_time - start_time) > upd_time:
-                design_plot(plot_container)
-                start_time = time.time()
-        else:
-            st.success("Optimization finished!")
-            st.balloons()
-            time.sleep(2)
-            st.experimental_rerun()
+            upd_time = 2.0
+            start_time = time.time()
+            st.session_state.running_opt = True
+            while (
+                topopt.max_rho_change > topopt.min_change
+                and topopt.iter < topopt.max_iter
+            ):
+                topopt.step()
+                end_time = time.time()
+                if (end_time - start_time) > upd_time:
+                    design_plot(plot_container)
+                    start_time = time.time()
+            else:
+                st.success("Optimization finished!")
+                st.balloons()
+                time.sleep(2)
+                st.experimental_rerun()
     elif reset_button:
         st.session_state.topopt = st.session_state.topopt.__class__(**opt_params)
 
@@ -193,17 +207,17 @@ def app():
 
     st.session_state.running_opt = False
 
-    nelx, nely, problem = fea_parameter_selector()
+    nelx, nely, solver, problem = fea_parameter_selector()
 
     if "mesh" or "fea" not in st.session_state:
         mesh = QuadMesh(nelx, nely)
-        fea = LinearElasticity(mesh)
+        fea = LinearElasticity(mesh, solver=solver)
         if problem == "MBB":
             benchmarks.init_MBB_beam(mesh, fea)
         elif problem == "Bridge":
             benchmarks.init_bridge(mesh, fea)
         elif problem == "Cantilever":
-            benchmarks.init_cantilever_beam()
+            benchmarks.init_cantilever_beam(mesh, fea)
         elif problem == "Caramel":
             benchmarks.init_caramel(mesh, fea)
         st.session_state["mesh"] = mesh
@@ -221,9 +235,6 @@ def app():
 
         st.session_state["topopt"] = topopt
 
-    if "img_container" not in st.session_state:
-        st.session_state["img_container"] = st.container()
-
     opt_container = st.empty()
     opt_control_panel(opt_params, opt_container)
     if st.session_state.running_opt is False:
@@ -238,11 +249,15 @@ def app():
         if plot_type == "Strain energy":
             disp = st.session_state.topopt.fea.displacement
             strain_energy_mat = st.session_state.fea.compute_strain_energy(disp)
+            dens_mask = st.session_state.topopt.rho_phys < 0.1
+            strain_energy_mat[dens_mask] = np.nan
             img_buf = matshow_to_image_buffer(strain_energy_mat, display_cmap=True)
             st.image(img_buf, caption=plot_type)
         elif plot_type == "Von Mises":
             disp = st.session_state.topopt.fea.displacement
             sigma_vm_mat = st.session_state.fea.compute_von_mises_stresses(disp)
+            dens_mask = st.session_state.topopt.rho_phys < 0.1
+            sigma_vm_mat[dens_mask] = np.nan
             img_buf = matshow_to_image_buffer(sigma_vm_mat, display_cmap=True)
             st.image(img_buf, caption=plot_type)
         elif plot_type == "Log metrics":

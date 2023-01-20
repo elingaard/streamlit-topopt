@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Tuple, List, Literal
 
 import numpy as np
 import scipy.sparse as sp
@@ -145,10 +145,12 @@ class LinearElasticity:
     def __init__(
         self,
         mesh: QuadMesh,
+        solver: Literal["dense-direct", "sparse-direct", "mgcg"] = "sparse-direct",
         poisson_ratio: float = 0.3,
         youngs_modulus: float = 1.0,
     ):
         self.mesh = mesh
+        self.solver = solver
         self.poisson_ratio = poisson_ratio
         self.youngs_modulus = youngs_modulus
         self.Emin = 1e-9 * self.youngs_modulus
@@ -160,6 +162,18 @@ class LinearElasticity:
         self.Cmat = self.constitutive_stress_matrix()
         self.B0 = self.strain_displacement_matrix()
         self.KE = self.element_stiffness_matrix()
+
+        if solver == "mgcg":
+            ndof = mesh.ndof
+            n_levels = 0
+            while ndof > 1e3:
+                n_levels += 1
+                ndof = SparseMGCG.calc_coarse_level_ndof(mesh.nelx, mesh.nely, n_levels)
+
+            if (n_levels - 1) > 0:
+                self.mgcg = SparseMGCG(mesh.nelx, mesh.nely, n_levels=n_levels - 1)
+            else:
+                raise RuntimeError("Too few elements for multi-grid solver")
 
     @staticmethod
     def is_integer_np_array(arr):
@@ -288,19 +302,16 @@ class LinearElasticity:
 
         return self.stiffness_matrix
 
-    def solve_(
-        self, rho: np.ndarray, penal, unit_load: bool = False, sparse: bool = True
-    ) -> np.ndarray:
+    def solve_(self, rho: np.ndarray, penal, unit_load: bool = False) -> np.ndarray:
         """Solves the linear system Ku=F
 
         Args:
         rho(nely x nelx float matrix): density matrix
         penal(float): penalty of intermediate densities
         unit_load(bool): normalize load to unit magnitude
-        sparse(bool): matrix type
 
         Returns:
-        U(ndof x 1 float array): displacement vector
+        disp(ndof x 1 float array): displacement vector
 
         """
 
@@ -317,7 +328,7 @@ class LinearElasticity:
             self.load /= load_sum
 
         # assemble the stiffness matrix
-        if sparse is False:
+        if self.solver == "dense-direct":
             self.stiffness_matrix_assembly(rho, penal, sparse=False)
             # apply BC using zero-one method
             self.stiffness_matrix[self.fixed_dofs, :] = 0
@@ -326,7 +337,7 @@ class LinearElasticity:
             self.load[self.fixed_dofs] = 0
             # solve system
             disp = np.linalg.solve(self.stiffness_matrix, self.load)
-        elif sparse is True:
+        elif self.solver == "sparse-direct":
             self.stiffness_matrix_assembly(rho, penal, sparse=True)
             # get free dofs
             all_dofs = np.arange(2 * (self.mesh.nelx + 1) * (self.mesh.nely + 1))
@@ -335,6 +346,26 @@ class LinearElasticity:
             # only solve system for free dofs
             disp = np.zeros(self.mesh.ndof)
             disp[free_dofs] = sp.linalg.spsolve(K_free, self.load[free_dofs])
+        elif self.solver == "mgcg":
+            # apply BC using matrix multiplications (multi-grid solver requires true
+            # size of matrices so we cannot only solve for free dofs)
+            self.stiffness_matrix_assembly(rho, penal, sparse=True)
+            null_diag = np.ones(self.mesh.ndof)
+            null_diag[self.fixed_dofs] = 0
+            null_mat = sp.diags(null_diag)
+            eye_mat = sp.eye(self.mesh.ndof)
+            K_stiff = null_mat.T.dot(self.stiffness_matrix).dot(null_mat) - (
+                null_mat - eye_mat
+            )
+            disp = self.mgcg.solve_(
+                K_stiff,
+                self.load,
+                rtol=1e-10,
+                conv_criterion="disp",
+                verbose=False,
+            )
+        else:
+            raise RuntimeError("Solver not recognized")
 
         # store displacement vector for later use (strain energy, stresses etc.)
         self.displacement = disp.copy()
@@ -353,7 +384,7 @@ class LinearElasticity:
         assert axis < 2
 
         bound_dofs = node_ids * 2 + (1 * axis)
-        self.fixed_dofs = np.union1d(self.fixed_dofs, bound_dofs)
+        self.fixed_dofs = np.union1d(self.fixed_dofs, bound_dofs).astype(int)
 
     def insert_node_load(self, node_id: int, load_vec: tuple) -> None:
         """Modifies the load vector to incorporate a new point load
@@ -584,7 +615,8 @@ class LinearElasticity:
         sigma_vm = (
             sigma_mat[0] ** 2
             + sigma_mat[1] ** 2
-            - (sigma_mat[0] * sigma_mat[1]) + (3 * sigma_mat[2] ** 2)
+            - (sigma_mat[0] * sigma_mat[1])
+            + (3 * sigma_mat[2] ** 2)
         )
         sigma_vm = np.sqrt(sigma_vm)
         return sigma_vm
@@ -614,3 +646,235 @@ class LinearElasticity:
         psi1 = np.arctan2(-2 * sigma_mat[2], sigma_mat[0] - sigma_mat[1]) / 2
         psi2 = psi1 - np.pi / 2
         return sigma1, sigma2, psi1, psi2
+
+
+def sparse_restriction_matrix(
+    nelx_f: int, nely_f: int, reduction_factor: int = 2
+) -> sp.csr_matrix:
+    """Sparse restriction/prolongation (i.e. transposed restriction) matrix used to map
+    between different levels in the multi-grid methods
+
+    Args:
+    nelx_f(int): fine-grid number of elements in x-direction
+    nely_f(int): fine-grid number of elements in y-direction
+    reduction_factor(int): relative reduction of mesh size
+
+    Returns:
+    P(ndof_f x ndof_c sparse float matrix): restriction matrix
+
+    """
+    nelx_c = nelx_f // reduction_factor
+    nely_c = nely_f // reduction_factor
+    ndof_f = 2 * (nelx_f + 1) * (nely_f + 1)
+    ndof_c = 2 * (nelx_c + 1) * (nely_c + 1)
+    # since we don't know the number of nnz in advance assign assign a safety factor
+    nnz_safety_factor = 20
+    max_nnz = nelx_c * nely_c * nnz_safety_factor
+    iP = np.zeros(max_nnz).astype(int)
+    jP = np.zeros(max_nnz).astype(int)
+    sP = np.zeros(max_nnz)
+    weights = np.array([1, 0.5, 0.25])  # interpolation weights
+
+    nnz_cnt = 0  # nnz counter
+    for nx in range(nelx_c + 1):
+        for ny in range(nely_c + 1):
+            col = nx * (nely_c + 1) + ny
+            # coordinate on fine grid
+            nx_f = nx * 2
+            ny_f = ny * 2
+            # get node neighbourhood
+            x_st_idx = max(nx_f - 1, 0)
+            x_end_idx = min(nx_f + 1, nelx_f)
+            y_st_idx = max(ny_f - 1, 0)
+            y_end_idx = min(ny_f + 1, nely_f)
+            # loop over neighbourhood and add interpolation weights and index to
+            # sparse matrix initialization arrays
+            for x_idx in range(x_st_idx, x_end_idx + 1):
+                for y_idx in range(y_st_idx, y_end_idx + 1):
+                    row = x_idx * (nely_f + 1) + y_idx
+                    ind = int((nx_f - x_idx) ** 2 + (ny_f - y_idx) ** 2)
+                    nnz_cnt += 1
+                    iP[nnz_cnt] = 2 * row
+                    jP[nnz_cnt] = 2 * col
+                    sP[nnz_cnt] = weights[ind]
+                    nnz_cnt += 1
+                    iP[nnz_cnt] = 2 * row + 1
+                    jP[nnz_cnt] = 2 * col + 1
+                    sP[nnz_cnt] = weights[ind]
+
+    P = sp.coo_matrix(
+        (sP[: nnz_cnt + 1], (iP[: nnz_cnt + 1], jP[: nnz_cnt + 1])),
+        shape=(ndof_f, ndof_c),
+    ).tocsr()
+
+    return P
+
+
+class SparseMGCG:
+    """Sparse multi-grid conjugate gradients method implemented on the CPU
+
+    Attributes:
+    self.n_levels(int): number of levels in the V-cycle
+    self.omega(float): jacobi smoothing factor
+    self.n_jac(int): number of jacobi smoothing operations in each level
+    self.restriction_mats(list): list of restriction matrices mapping from one level
+    to the next
+    """
+
+    def __init__(self, nelx: int, nely: int, n_levels: int, n_jac: int = 2) -> None:
+        assert n_levels > 0
+
+        self.n_levels = n_levels
+        self.omega = 0.8
+        self.n_jac = n_jac
+        # degrees of freedom at coarsest level
+        ndof_c = self.calc_coarse_level_ndof(nelx, nely, n_levels)
+        if ndof_c < 1e3:
+            raise RuntimeError(
+                """System size at coarse level too small. Please decrease number of 
+                levels or use a direct solver"""
+            )
+        else:
+            print("Preparing restriction matrices")
+            self.restriction_mats = []
+            for lvl in range(self.n_levels):
+                restr_mat = sparse_restriction_matrix(
+                    nelx // (2**lvl), nely // (2**lvl)
+                )
+                self.restriction_mats.append(restr_mat.tocsr())
+
+    @staticmethod
+    def calc_coarse_level_ndof(nelx: int, nely: int, n_levels: int) -> int:
+        return 2 * (nelx // (2**n_levels) + 1) * (nely // (2**n_levels) + 1)
+
+    def jacobi_smooth(
+        self, x: np.ndarray, A: sp.csc_matrix, b: np.ndarray
+    ) -> np.ndarray:
+        """Function for performing jacobi smoothing
+
+        Args:
+        x(ndof float vector): current solution vector
+        A(ndof x ndof sparse float matrix): system matrixƒ
+        b(ndof float vector): right-hand side of system
+
+        Returns:
+        x(ndof vector): new solution vector
+        """
+
+        A_diag = A.diagonal()
+        D = sp.diags(A_diag)
+        invD = sp.diags(1 / A_diag)
+        LU = A - D
+        for _ in range(self.n_jac):
+            x = self.omega * invD.dot(b - LU.dot(x)) + (1 - self.omega) * x
+        return x
+
+    def Vcycle(
+        self, A_L: List[sp.csc_matrix], factor: object, res: np.ndarray, level: int
+    ) -> np.ndarray:
+        """Function for performing one V-cycle iteration, i.e. solve to get a solution
+        'x' that minimizes the residual 'res' at the current level
+
+        Args:
+        A_L(list): system matrix at each level
+        factor(factorization object): pre-computed factorization at lowest level
+        res(ndof float vector): conjugate gradient residual vector
+        level(int): current level
+
+        Returns:
+        z(ndof float vector): solution vector
+        """
+
+        z0 = res * 0  # initialize solution
+        z = self.jacobi_smooth(z0, A_L[level], res)  # smooth
+        z_r = A_L[level].dot(z)  # restrict
+        d = res - z_r  # new residual
+        d_r = self.restriction_mats[level].T.dot(d)  # restrict residual
+        # if at last level solve system using direct solver
+        if level + 1 == self.n_levels:
+            x = factor(d_r)
+        else:  # else move to next level
+            x = self.Vcycle(A_L, factor, d_r, level + 1)
+        x_p = self.restriction_mats[level].dot(x)  # prolong
+        z += x_p
+        z = self.jacobi_smooth(z, A_L[level], res)  # smooth
+        return z
+
+    def solve_(
+        self,
+        A: sp.csc_matrix,
+        b: np.ndarray,
+        max_iter: int = 100,
+        rtol: float = 1e-6,
+        conv_criterion: str = "comp",
+        verbose: bool = False,
+    ) -> np.ndarray:
+        """Solve sparse system A*x=b using multi-grid preconditioned conjugate gradient
+        method with compliance or solution convergence criterion
+
+        Args:
+        A(sparse matrix): sparse system matrix
+        b(ndof float vector): right-hand side of system
+        max_iter(int): max number of iterations for the MGCG solver
+        rtol(float): relative error on the convergence criterion
+        conv_criterion(str): whether to use compliance 'comp' or displacement 'disp'
+        as the convergence criterion
+        verbose(bool): print relevant output
+
+        Returns:
+        x(ndof float vector): solution vector
+        """
+
+        # precompute system matrix for each level
+        if verbose is True:
+            print("Precomputing system matrices at each level...")
+
+        A_L = [A]
+        for level in range(self.n_levels):
+            restr_mat = self.restriction_mats[level]
+            A = restr_mat.T.dot(A_L[level]).dot(restr_mat)
+            A_L.append(A)
+
+        # factorize lowest level matrix
+        factor = sp.linalg.factorized(A_L[-1])
+        # initialize solution vector as 0 and calculate residual
+        res0 = np.linalg.norm(b)
+        x = np.zeros(A_L[0].shape[0])
+        res = b - A_L[0].dot(x)
+
+        # initialize convergence criteria
+        if conv_criterion == "comp":
+            conv_crit = 1e6
+            prev_comp = 1e6
+        elif conv_criterion == "disp":
+            conv_crit = 1e6
+
+        # start iterative solve
+        it = 0
+        while conv_crit > rtol and it < max_iter:
+            z = self.Vcycle(A_L, factor, res, level=0)
+            rho = res.T.dot(z)
+            if it == 0:
+                p = z
+            else:
+                beta = rho / rho_p
+                p = beta * p + z
+            q = A_L[0].dot(p)
+            alpha = rho / p.T.dot(q)
+            x += alpha * p
+            res -= alpha * q
+            rho_p = rho
+
+            it += 1
+
+            if conv_criterion == "comp":
+                comp = A_L[0].dot(x).dot(x).item()
+                conv_crit = np.abs(comp - prev_comp) / prev_comp
+                prev_comp = comp
+            elif conv_criterion == "disp":
+                conv_crit = np.linalg.norm(res) / res0
+
+            if verbose is True:
+                print("It. {} Rel. error {} ".format(*[it, conv_crit]))
+
+        return x
