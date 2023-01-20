@@ -4,7 +4,9 @@ import time
 from io import BytesIO
 
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
+import altair as alt
 import streamlit as st
 
 try:
@@ -24,14 +26,13 @@ from st_topopt.topopt import (
 MAX_FIGSIZE = 16
 
 
-def get_figsize_from_array(arr):
-    height, width = arr.shape
-    scale_factor = max(height, width) // MAX_FIGSIZE
-    figsize = (width // scale_factor, height // scale_factor)
-    return figsize
-
-
 def matshow_to_image_buffer(mat, display_cmap=False, **kwargs):
+    def get_figsize_from_array(arr):
+        height, width = arr.shape
+        scale_factor = max(height, width) // MAX_FIGSIZE
+        figsize = (width // scale_factor, height // scale_factor)
+        return figsize
+
     figsize = get_figsize_from_array(mat)
     fig, ax = plt.subplots(figsize=figsize)
     im = ax.matshow(mat, **kwargs)
@@ -153,11 +154,11 @@ def opt_parameter_selector():
     return opt_params, filter_type
 
 
-def design_plot(container):
-    with container.container():
-        st.text(
-            f"Comp: {st.session_state.topopt.comp :.2f}, it. {st.session_state.topopt.iter}"
-        )
+def show_design_field(placeholder: st.container):
+    with placeholder.container():
+        iter = st.session_state.topopt.iter
+        comp = st.session_state.topopt.comp
+        st.text(f"Comp: {comp :.2f}, it. {iter}")
         rho_phys = st.session_state.topopt.rho_phys
         img_buf = matshow_to_image_buffer(
             -rho_phys, display_cmap=False, vmin=-1, vmax=0, cmap="gray"
@@ -165,9 +166,28 @@ def design_plot(container):
         st.image(img_buf)
 
 
-def opt_control_panel(opt_params, plot_container):
-    st.write("**Optimization control panel**")
-    c1, c2, c3, c4, _ = st.columns([0.15, 0.2, 0.15, 0.15, 0.35])
+def run_optimization():
+    placeholder = st.empty()
+    topopt = st.session_state.topopt
+    topopt.step()
+    upd_time = 2.0
+    start_time = time.time()
+    while topopt.max_rho_change > topopt.min_change and topopt.iter < topopt.max_iter:
+        topopt.step()
+        end_time = time.time()
+        if (end_time - start_time) > upd_time:
+            show_design_field(placeholder)
+            start_time = time.time()
+    else:
+        st.success("Optimization finished!")
+        st.balloons()
+        time.sleep(2)
+        st.experimental_rerun()
+
+
+def opt_control_panel(opt_params):
+    st.subheader("Optimization control panel")
+    c1, c2, c3, c4 = st.columns(4)
     step1_button = c1.button("Step ➡️")
     step10_button = c2.button("Step 10 ⏩")
     run_button = c3.button("Run ▶️")
@@ -179,33 +199,34 @@ def opt_control_panel(opt_params, plot_container):
             st.session_state.topopt.step()
     elif run_button:
         with st.spinner("Running optimization..."):
-            topopt = st.session_state.topopt
-            topopt.step()
-            upd_time = 2.0
-            start_time = time.time()
-            st.session_state.running_opt = True
-            while (
-                topopt.max_rho_change > topopt.min_change
-                and topopt.iter < topopt.max_iter
-            ):
-                topopt.step()
-                end_time = time.time()
-                if (end_time - start_time) > upd_time:
-                    design_plot(plot_container)
-                    start_time = time.time()
-            else:
-                st.success("Optimization finished!")
-                st.balloons()
-                time.sleep(2)
-                st.experimental_rerun()
+            run_optimization()
     elif reset_button:
         st.session_state.topopt = st.session_state.topopt.__class__(**opt_params)
 
 
-def app():
-    st.title("Streamlit TopOpt App")
+def download_design():
+    with BytesIO() as buffer:
+        # Write array to buffer
+        np.save(buffer, st.session_state.topopt.rho_phys)
+        st.download_button(
+            label="Download design ⬇️",
+            data=buffer,
+            file_name="design.npy",
+            help="Download the design as a numpy array (.npy)",
+        )
 
-    st.session_state.running_opt = False
+
+def app():
+    st.title("Topology optimizer")
+
+    intro_text = """Welcome! 👋 this is an app for quickly trying out different solvers,
+    hyperparameters, and filters on a few different benchmark topology optimzation 
+    problems."""
+    st.write(intro_text)
+    intro_text2 = """Choose the optimization problem and parameters in the the two 
+    expanders below, and use the control panel to perform a single step or run the 
+    entire optimization."""
+    st.write(intro_text2)
 
     nelx, nely, solver, problem = fea_parameter_selector()
 
@@ -235,42 +256,44 @@ def app():
 
         st.session_state["topopt"] = topopt
 
-    opt_container = st.empty()
-    opt_control_panel(opt_params, opt_container)
-    if st.session_state.running_opt is False:
-        design_plot(st.container())
+    opt_control_panel(opt_params)
+    show_design_field(st.container())
+    download_design()
 
     with st.expander("Analysis"):
-        plot_type = st.radio(
+        plot_var = st.radio(
             "What do you want to plot?",
             options=["Von Mises", "Strain energy", "Log metrics"],
             horizontal=True,
         )
-        if plot_type == "Strain energy":
+
+        if plot_var == "Strain energy" or plot_var == "Von Mises":
             disp = st.session_state.topopt.fea.displacement
-            strain_energy_mat = st.session_state.fea.compute_strain_energy(disp)
             dens_mask = st.session_state.topopt.rho_phys < 0.1
-            strain_energy_mat[dens_mask] = np.nan
-            img_buf = matshow_to_image_buffer(strain_energy_mat, display_cmap=True)
-            st.image(img_buf, caption=plot_type)
-        elif plot_type == "Von Mises":
-            disp = st.session_state.topopt.fea.displacement
-            sigma_vm_mat = st.session_state.fea.compute_von_mises_stresses(disp)
-            dens_mask = st.session_state.topopt.rho_phys < 0.1
-            sigma_vm_mat[dens_mask] = np.nan
-            img_buf = matshow_to_image_buffer(sigma_vm_mat, display_cmap=True)
-            st.image(img_buf, caption=plot_type)
-        elif plot_type == "Log metrics":
+            if plot_var == "Strain energy":
+                var_mat = st.session_state.fea.compute_strain_energy(disp)
+            elif plot_var == "Von Mises":
+                var_mat = st.session_state.fea.compute_von_mises_stresses(disp)
+            var_mat[dens_mask] = np.nan
+            img_buf = matshow_to_image_buffer(var_mat, display_cmap=True)
+            st.image(img_buf, caption=plot_var)
+
+        elif plot_var == "Log metrics":
             logger = st.session_state.topopt.logger
             if logger.metrics:
-                metric_options = list(logger.metrics.keys())
+                log_df = pd.DataFrame(logger.metrics)
+                metric_options = log_df.columns.tolist()
                 metric_options.remove("iter")
                 metric_key = st.selectbox("Metric", options=metric_options)
-                fig, ax = plt.subplots()
-                ax.plot(logger.metrics["iter"], logger.metrics[metric_key], "-o")
-                ax.set_xlabel("Iter.")
-                ax.set_ylabel(metric_key)
-                st.pyplot(fig)
+                log_chart = (
+                    alt.Chart(log_df)
+                    .mark_line(point=True)
+                    .encode(
+                        x="iter:Q", y=f"{metric_key}:Q", tooltip=["iter", metric_key]
+                    )
+                    .interactive()
+                )
+                st.altair_chart(log_chart, use_container_width=True)
             else:
                 st.info("No metrics logged yet")
 
