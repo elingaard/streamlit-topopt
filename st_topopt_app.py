@@ -61,9 +61,11 @@ def fea_parameter_selector():
                 value=60,
                 help="Number of elements in vertical direction",
             )
+            solver_disp_names = {"sparse-direct": "direct", "mgcg": "iterative"}
             solver = c3.selectbox(
                 "Solver",
-                options=["direct", "iterative"],
+                options=["sparse-direct", "mgcg"],
+                format_func=lambda k: solver_disp_names[k],
                 help="""Use the direct solver for smaller problems and the iterative 
                 solver for larger problems """,
             )
@@ -215,7 +217,7 @@ def app():
         elif problem == "Bridge":
             benchmarks.init_bridge(mesh, fea)
         elif problem == "Cantilever":
-            benchmarks.init_cantilever_beam()
+            benchmarks.init_cantilever_beam(mesh, fea)
         elif problem == "Caramel":
             benchmarks.init_caramel(mesh, fea)
         st.session_state["mesh"] = mesh
@@ -232,9 +234,6 @@ def app():
             topopt = HeavisideFilterTopOpt(**opt_params)
 
         st.session_state["topopt"] = topopt
-
-    if "img_container" not in st.session_state:
-        st.session_state["img_container"] = st.container()
 
     opt_container = st.empty()
     opt_control_panel(opt_params, opt_container)

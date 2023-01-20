@@ -39,7 +39,7 @@ class ComplianceTopOpt(ABC):
         self.move_limit = move_limit
         self.rho = np.ones((self.mesh.nely, self.mesh.nelx)) * self.volfrac
         self.rho_phys = self.rho.copy()
-        disp = self.fea.solve_(self.rho_phys, self.penal, sparse=True, unit_load=True)
+        disp = self.fea.solve_(self.rho_phys, self.penal, unit_load=True)
         self.comp, _ = self.eval_compliance(disp)
         self.iter = 0
 
@@ -102,7 +102,7 @@ class ComplianceTopOpt(ABC):
         pass
 
     def step(self):
-        disp = self.fea.solve_(self.rho_phys, self.penal, sparse=True, unit_load=True)
+        disp = self.fea.solve_(self.rho_phys, self.penal, unit_load=True)
         comp, ce = self.eval_compliance(disp)
         dc, dv = self.eval_sensitivities(ce)
         dc, dv = self.apply_sensitivity_filter(dc, dv)
