@@ -6,6 +6,7 @@ from io import BytesIO
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from PIL import Image, ImageDraw, ImageOps
 import altair as alt
 import streamlit as st
 
@@ -26,13 +27,60 @@ from st_topopt.topopt import (
 MAX_FIGSIZE = 16
 
 
-def matshow_to_image_buffer(mat, display_cmap=False, **kwargs):
-    def get_figsize_from_array(arr):
-        height, width = arr.shape
-        scale_factor = max(height, width) // MAX_FIGSIZE
-        figsize = (width // scale_factor, height // scale_factor)
-        return figsize
+def get_figsize_from_array(arr):
+    height, width = arr.shape
+    scale_factor = max(height, width) // MAX_FIGSIZE
+    figsize = (width // scale_factor, height // scale_factor)
+    return figsize
 
+
+class PillowGIFRecorder:
+    def __init__(self) -> None:
+        self.frames = []
+        self.max_size = 800
+
+    @staticmethod
+    def to_grayscale_img(rho):
+        rho_img = ((1 - rho) * 255).astype(np.uint8)
+        return rho_img
+
+    def resize_(self, img):
+        H, W = img.size
+        max_dim = max(H, W)
+        scale_factor = self.max_size / max_dim
+        return img.resize((int(H * scale_factor), int(W * scale_factor)), Image.NEAREST)
+
+    def add_frame(self, rho):
+        assert rho.ndim == 2
+
+        rho_img = self.to_grayscale_img(rho)
+        pil_img = Image.fromarray(rho_img, "L").convert("P")
+        pil_img = self.resize_(pil_img)
+
+        pil_img = ImageOps.expand(pil_img, border=20, fill=255)
+        draw = ImageDraw.Draw(pil_img)
+        draw.text((20, 0), f"It. {len(self.frames)}")
+
+        self.frames.append(pil_img)
+
+    def reset_(self):
+        self.frames = []
+
+    def save_bytes_(self):
+        gif_bytes = BytesIO()
+        self.frames[0].save(
+            gif_bytes,
+            format="gif",
+            save_all=True,
+            append_images=self.frames[1:],
+            optimize=False,
+            duration=1000,
+            loop=0,
+        )
+        return gif_bytes
+
+
+def matshow_to_image_buffer(mat, display_cmap=False, **kwargs):
     figsize = get_figsize_from_array(mat)
     fig, ax = plt.subplots(figsize=figsize)
     im = ax.matshow(mat, **kwargs)
@@ -178,6 +226,8 @@ def run_optimization():
         if (end_time - start_time) > upd_time:
             show_design_field(placeholder)
             start_time = time.time()
+        if st.session_state.record:
+            st.session_state.vid_recorder.add_frame(topopt.rho_phys)
     else:
         st.success("Optimization finished!")
         st.balloons()
@@ -187,21 +237,25 @@ def run_optimization():
 
 def opt_control_panel(opt_params):
     st.subheader("Optimization control panel")
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     step1_button = c1.button("Step ➡️")
     step10_button = c2.button("Step 10 ⏩")
     run_button = c3.button("Run ▶️")
     reset_button = c4.button("Reset 🔄")
+    record_button = c5.checkbox("Record 🎥")
     if step1_button:
         st.session_state.topopt.step()
     elif step10_button:
         for _ in range(10):
             st.session_state.topopt.step()
     elif run_button:
+        st.session_state.vid_recorder.reset_()
         with st.spinner("Running optimization..."):
             run_optimization()
     elif reset_button:
         st.session_state.topopt = st.session_state.topopt.__class__(**opt_params)
+    elif record_button:
+        st.session_state.record = True
 
 
 def download_design():
@@ -228,9 +282,13 @@ def app():
     entire optimization."""
     st.write(intro_text2)
 
+    if "vid_recorder" not in st.session_state:
+        st.session_state.record = False
+        st.session_state["vid_recorder"] = PillowGIFRecorder()
+
     nelx, nely, solver, problem = fea_parameter_selector()
 
-    if "mesh" or "fea" not in st.session_state:
+    if "mesh" not in st.session_state or "fea" not in st.session_state:
         mesh = QuadMesh(nelx, nely)
         fea = LinearElasticity(mesh, solver=solver)
         if problem == "MBB":
@@ -243,6 +301,7 @@ def app():
             benchmarks.init_caramel(mesh, fea)
         st.session_state["mesh"] = mesh
         st.session_state["fea"] = fea
+        st.session_state.vid_recorder.reset_()
 
     opt_params, filter_type = opt_parameter_selector()
 
@@ -263,7 +322,7 @@ def app():
     with st.expander("Analysis"):
         plot_var = st.radio(
             "What do you want to plot?",
-            options=["Von Mises", "Strain energy", "Log metrics"],
+            options=["Von Mises", "Strain energy", "Log metrics", "Video"],
             horizontal=True,
         )
 
@@ -296,6 +355,19 @@ def app():
                 st.altair_chart(log_chart, use_container_width=True)
             else:
                 st.info("No metrics logged yet")
+
+        elif plot_var == "Video":
+            if st.session_state.vid_recorder.frames:
+                gif_bytes = st.session_state.vid_recorder.save_bytes_()
+                st.image(gif_bytes)
+                st.download_button(
+                    label="Download video ⬇️",
+                    data=gif_bytes,
+                    file_name="opt.gif",
+                    help="Download the optimization video",
+                )
+            else:
+                st.info("No video recorded yet")
 
 
 if __name__ == "__main__":
