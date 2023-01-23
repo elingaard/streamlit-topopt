@@ -8,20 +8,21 @@ import pandas as pd
 import altair as alt
 import streamlit as st
 
-try:
-    import st_topopt
-except ModuleNotFoundError:
-    subprocess.Popen([f"{sys.executable} setup.py install"], shell=True)
-    time.sleep(90)  # wait for install to finish
-
-from st_topopt.FEA import QuadMesh, LinearElasticity
-from st_topopt import benchmarks
-from st_topopt.utils import PillowGIFWriter, matshow_to_image_buffer
-from st_topopt.topopt import (
-    SensitivityFilterTopOpt,
-    DensityFilterTopOpt,
-    HeavisideFilterTopOpt,
-)
+with st.spinner("Installing packages..."):
+    try:
+        import st_topopt
+    except ModuleNotFoundError:
+        subprocess.call([f"{sys.executable} setup.py install"], shell=True)
+        # time.sleep(90)  # wait for install to finish
+    finally:
+        from st_topopt.FEA import QuadMesh, LinearElasticity
+        from st_topopt import benchmarks
+        from st_topopt.utils import PillowGIFWriter, matshow_to_image_buffer
+        from st_topopt.topopt import (
+            SensitivityFilterTopOpt,
+            DensityFilterTopOpt,
+            HeavisideFilterTopOpt,
+        )
 
 
 def fea_parameter_selector():
