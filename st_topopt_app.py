@@ -13,7 +13,6 @@ with st.spinner("Installing packages..."):
         import st_topopt
     except ModuleNotFoundError:
         subprocess.call([f"{sys.executable} setup.py install"], shell=True)
-        # time.sleep(90)  # wait for install to finish
     finally:
         from st_topopt.FEA import QuadMesh, LinearElasticity
         from st_topopt import benchmarks
@@ -85,36 +84,49 @@ def opt_parameter_selector():
             max_value=5.0,
             value=3.0,
             help="""Penalty on intermediate densities which helps force the solution 
-            towards 0 and 1. Higher means stronger enforcement""",
+            towards material or no material in each element. Higher means stronger 
+            enforcement.""",
         )
         filter_radius = c3.number_input(
             "Filter radius",
             min_value=1.0,
             max_value=100.0,
             value=1.5,
-            help="""Filter radius. Can also be interpreted as minimum feature size.
-            """,
+            help="""Filter radius in elements. Can also be interpreted as minimum 
+            feature size.""",
         )
         max_iter = c1.number_input(
-            "Max iterations", min_value=1, max_value=10000, value=100
+            "Max iterations",
+            min_value=1,
+            max_value=10000,
+            value=100,
+            help="""Maximum number of iterations the optimization is allowed to run.""",
         )
         min_change = c2.number_input(
             "Min design change",
             min_value=0.0,
             max_value=1.0,
             value=0.01,
-            help="""Convergence criteria based on minimum change in any design 
-            variable""",
+            help="""The optimization will change when the maximum change in any design
+            variable is less than this value.""",
         )
         move_limit = c3.number_input(
             "Move limit",
             min_value=0.0,
             max_value=1.0,
             value=0.2,
-            help="Maximum change of a design variable during one optimization step",
+            help="""Upper limit on how much a single design variable can change during 
+            one optimization step""",
         )
         filter_options = ["Sensitivity", "Density", "Heaviside"]
-        filter_type = c1.selectbox("Filter type", options=filter_options)
+        filter_type = c1.selectbox(
+            "Filter type",
+            options=filter_options,
+            help="""Sensitive filter: filter is applied to the sensitivities of the 
+        objective function. Density filter: filter is applied directly to the densities.
+        Heaviside filter: filter gradually applies an approximation of the Heaviside
+        function to the densities to strongly enforce binary designs.""",
+        )
 
         if st.form_submit_button("Submit"):
             del st.session_state.topopt
@@ -176,7 +188,11 @@ def opt_control_panel(opt_params):
     step10_button = c2.button("Step 10 ⏩")
     run_button = c3.button("Run ▶️")
     reset_button = c4.button("Reset 🔄")
-    record_button = c5.checkbox("Record 🎥")
+    record_button = c5.checkbox(
+        "Record 🎥",
+        help="""Enable/disable recording. If 
+    enabled, the video can be shown and downloaded in the analysis section.""",
+    )
     if step1_button:
         st.session_state.topopt.step()
     elif step10_button:
@@ -207,8 +223,8 @@ def app():
     st.title("Compliance topology optimizer")
 
     intro_text = """Welcome! 👋 this is an app for quickly trying out different solvers,
-    hyperparameters, and filters on a few different benchmarks for compliance topology 
-    optimzation problems."""
+    hyper-parameters, and filters on a set of benchmark problems for compliance 
+    topology optimization."""
     st.write(intro_text)
     intro_text2 = """Choose the optimization problem and parameters in the the two 
     expanders below, and use the control panel to perform a single step or run the 
@@ -219,7 +235,7 @@ def app():
         st.session_state.record = False
         st.session_state["gif_writer"] = PillowGIFWriter()
 
-    with st.expander("FEA parameters"):
+    with st.expander("Problem setup and solver"):
         nelx, nely, solver, problem = fea_parameter_selector()
 
     if "mesh" not in st.session_state or "fea" not in st.session_state:
