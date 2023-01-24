@@ -28,17 +28,17 @@ def fea_parameter_selector():
     with st.form("fea_params"):
         c1, c2, c3, c4 = st.columns(4)
         nelx = c1.number_input(
-            "nelx",
+            "Nr. elements in x",
             min_value=1,
             max_value=1000,
-            value=120,
+            value=80,
             help="Number of elements in horizontal direction",
         )
         nely = c2.number_input(
-            "nely",
+            "Nr. elements in y",
             min_value=1,
             max_value=1000,
-            value=60,
+            value=40,
             help="Number of elements in vertical direction",
         )
         solver_disp_names = {"sparse-direct": "direct", "mgcg": "iterative"}
@@ -46,14 +46,14 @@ def fea_parameter_selector():
             "Solver",
             options=["sparse-direct", "mgcg"],
             format_func=lambda k: solver_disp_names[k],
-            help="""Use the direct solver for smaller problems and the iterative solver 
-            for larger problems """,
+            help="""It is recommened to use the direct solver for smaller problems and 
+            the iterative solver for larger problems""",
         )
         problem_options = ["MBB", "Bridge", "Cantilever", "Caramel"]
         problem = c4.selectbox(
-            "problem",
+            "Problem",
             options=problem_options,
-            help="Choose between different standard problems",
+            help="Choose between the different standard problems visualized above",
         )
 
         if st.form_submit_button("Submit"):
@@ -84,8 +84,7 @@ def opt_parameter_selector():
             max_value=5.0,
             value=3.0,
             help="""Penalty on intermediate densities which helps force the solution 
-            towards material or no material in each element. Higher means stronger 
-            enforcement.""",
+            towards a binary design. Higher means stronger enforcement.""",
         )
         filter_radius = c3.number_input(
             "Filter radius",
@@ -122,9 +121,9 @@ def opt_parameter_selector():
         filter_type = c1.selectbox(
             "Filter type",
             options=filter_options,
-            help="""Sensitive filter: filter is applied to the sensitivities of the 
-        objective function. Density filter: filter is applied directly to the densities.
-        Heaviside filter: filter gradually applies an approximation of the Heaviside
+            help="""Sensitive filter: apply filter to the sensitivities of the 
+        objective function. Density filter: apply filter directly to the densities.
+        Heaviside filter: gradually apply an approximation of the Heaviside
         function to the densities to strongly enforce binary designs.""",
         )
 
@@ -145,11 +144,15 @@ def opt_parameter_selector():
     return opt_params, filter_type
 
 
-def show_design_field(placeholder: st.container):
+def show_opt_status(placeholder: st.container):
+    """Show results after one optimization step in terms of compliance, iteration,
+    and design field"""
     with placeholder.container():
         iter = st.session_state.topopt.iter
         comp = st.session_state.topopt.comp
-        st.text(f"Comp: {comp :.2f}, it. {iter}")
+        c1, c2, _ = st.columns([0.25, 0.25, 0.5])
+        c1.metric("Compliance", value=np.round(comp, 2))
+        c2.metric("Iteration", value=iter)
         rho_phys = st.session_state.topopt.rho_phys
         img_buf = matshow_to_image_buffer(
             -rho_phys, display_cmap=False, vmin=-1, vmax=0, cmap="gray"
@@ -161,7 +164,7 @@ def run_optimization():
     stop_placeholder = st.empty()
     design_placeholder = st.empty()
     topopt = st.session_state.topopt
-    topopt.step()
+    topopt.max_rho_change = 1e6
     upd_time = 2.0
     start_time = time.time()
     while topopt.max_rho_change > topopt.min_change and topopt.iter < topopt.max_iter:
@@ -170,7 +173,7 @@ def run_optimization():
         topopt.step()
         end_time = time.time()
         if (end_time - start_time) > upd_time:
-            show_design_field(design_placeholder)
+            show_opt_status(design_placeholder)
             start_time = time.time()
         if st.session_state.record:
             st.session_state.gif_writer.add_frame(topopt.rho_phys)
@@ -182,7 +185,6 @@ def run_optimization():
 
 
 def opt_control_panel(opt_params):
-    st.subheader("Optimization control panel")
     c1, c2, c3, c4, c5 = st.columns(5)
     step1_button = c1.button("Step ➡️")
     step10_button = c2.button("Step 10 ⏩")
@@ -190,8 +192,8 @@ def opt_control_panel(opt_params):
     reset_button = c4.button("Reset 🔄")
     record_button = c5.checkbox(
         "Record 🎥",
-        help="""Enable/disable recording. If 
-    enabled, the video can be shown and downloaded in the analysis section.""",
+        help="""Enable/disable recording of optimization process. If enabled, the video 
+        can be shown and downloaded in the analysis section.""",
     )
     if step1_button:
         st.session_state.topopt.step()
@@ -223,12 +225,23 @@ def app():
     st.title("Compliance topology optimizer")
 
     intro_text = """Welcome! 👋 this is an app for quickly trying out different solvers,
-    hyper-parameters, and filters on a set of benchmark problems for compliance 
+    hyper-parameters, and filters on a set of standard problems for compliance 
     topology optimization."""
     st.write(intro_text)
+
+    topopt_text = """*The goal of topology optimization is to optimize the material
+    layout within a given design space, subject to a set of constraints and loads. 
+    In this app only the compliance objective with a volume constraint is considered.
+    In layman terms this can be described as maximimizing the stiffness of the design
+    for a given amount of material. The design variables are the densities in each 
+    element of the discretized design domain (mesh).* """
+
+    with st.expander("What is compliance topology optimization?"):
+        st.markdown(topopt_text)
+
     intro_text2 = """Choose the optimization problem and parameters in the the two 
     expanders below, and use the control panel to perform a single step or run the 
-    entire optimization."""
+    entire optimization. """
     st.write(intro_text2)
 
     if "gif_writer" not in st.session_state:
@@ -236,6 +249,12 @@ def app():
         st.session_state["gif_writer"] = PillowGIFWriter()
 
     with st.expander("Problem setup and solver"):
+        st.image(
+            "imgs/TO_problems.png",
+            use_column_width=True,
+            caption="""Design domain, loads and boundary conditions for each of the 
+            standard problems""",
+        )
         nelx, nely, solver, problem = fea_parameter_selector()
 
     if "mesh" not in st.session_state or "fea" not in st.session_state:
@@ -266,14 +285,16 @@ def app():
 
         st.session_state["topopt"] = topopt
 
+    st.subheader("Optimization control panel")
     opt_control_panel(opt_params)
-    show_design_field(st.container())
+    show_opt_status(st.container())
     download_design()
 
     with st.expander("Analysis"):
         analysis_type = st.radio(
             "What do you want to show?",
             options=["Von Mises", "Strain energy", "Log metrics", "GIF"],
+            index=0,
             horizontal=True,
         )
 
