@@ -1,4 +1,6 @@
 import sys
+import site
+from importlib import reload
 import subprocess
 import time
 from io import BytesIO
@@ -14,6 +16,7 @@ with st.spinner("Installing packages..."):
     except ModuleNotFoundError:
         subprocess.call([f"{sys.executable} setup.py install"], shell=True)
     finally:
+        reload(site) # force reload of sys.path
         from st_topopt.FEA import QuadMesh, LinearElasticity
         from st_topopt import benchmarks
         from st_topopt.utils import PillowGIFWriter, matshow_to_image_buffer
