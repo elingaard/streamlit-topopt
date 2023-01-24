@@ -16,7 +16,7 @@ with st.spinner("Installing packages..."):
     except ModuleNotFoundError:
         subprocess.call([f"{sys.executable} setup.py install"], shell=True)
     finally:
-        reload(site) # force reload of sys.path
+        reload(site)  # force reload of sys.path
         from st_topopt.FEA import QuadMesh, LinearElasticity
         from st_topopt import benchmarks
         from st_topopt.utils import PillowGIFWriter, matshow_to_image_buffer
@@ -274,6 +274,15 @@ def app():
         st.session_state["mesh"] = mesh
         st.session_state["fea"] = fea
         st.session_state.gif_writer.reset_()
+
+    if (
+        st.session_state.mesh.ndof > 5e4
+        and st.session_state.fea.solver == "sparse-direct"
+    ):
+        st.warning(
+            """You are using the direct solver for a system with more than 50k 
+        degrees-of-freedom. For better performance use the iterative solver. """
+        )
 
     with st.expander("Optimization parameters"):
         opt_params, filter_type = opt_parameter_selector()
