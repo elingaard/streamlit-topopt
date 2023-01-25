@@ -360,8 +360,8 @@ class LinearElasticity:
             disp = self.mgcg.solve_(
                 K_stiff,
                 self.load,
-                rtol=1e-10,
-                conv_criterion="disp",
+                rtol=1e-6,
+                conv_criterion="comp",
                 verbose=False,
             )
         else:
@@ -805,8 +805,8 @@ class SparseMGCG:
         A: sp.csc_matrix,
         b: np.ndarray,
         max_iter: int = 100,
-        rtol: float = 1e-6,
-        conv_criterion: str = "comp",
+        rtol: float = 1e-10,
+        conv_criterion: str = "disp",
         verbose: bool = False,
     ) -> np.ndarray:
         """Solve sparse system A*x=b using multi-grid preconditioned conjugate gradient
