@@ -1,22 +1,24 @@
 from typing import Tuple, List, Literal
+from abc import ABC, abstractmethod
 
 import numpy as np
 import scipy.sparse as sp
 
 
-class QuadMesh:
+class QuadMesh2D:
     """Class for storing the attributes of a rectangular finite element mesh
 
     Attributes:
     self.nelx(int): number of elements in x-direction
     self.nely(int): number of elements in y-direction
+    self.node_ndof(int): number of degrees-of-freedom per node
     self.nele(int): number of elements in mesh
     self.nnodes(int): number of nodes in mesh
     self.ndof(int): number of degrees-of-freedom in mesh
     self.XY(nnodes x 2 int matrix): mesh node coordinates
     self.IX(nele x 4 int matrix): element connectivity matrix
-    self.edof_mat(nele x 8 int matrix): matrix containing degrees-of-freedom for each
-    element
+    self.edof_mat(nele x node_ndof int matrix): matrix containing degrees-of-freedom for
+    each element
 
     Mesh conventions:
     - Node numbering - column-wise, starting at the top
@@ -39,12 +41,16 @@ class QuadMesh:
     *---2---*
     """
 
-    def __init__(self, nelx: int, nely: int):
+    def __init__(self, nelx: int, nely: int, node_ndof: int):
+        assert node_ndof > 0
+        assert node_ndof <= 2
+
         self.nelx = nelx
         self.nely = nely
         self.nele = nelx * nely
         self.nnodes = (nelx + 1) * (nely + 1)
-        self.ndof = 2 * self.nnodes
+        self.node_ndof = node_ndof
+        self.ndof = self.node_ndof * self.nnodes
         Y_grid, X_grid = np.meshgrid(range(nely + 1), range(nelx + 1))
         self.XY = np.vstack((X_grid.flatten(), Y_grid.flatten())).T
         self.IX = self.get_connectivity_matrix()
@@ -74,17 +80,20 @@ class QuadMesh:
         holds the degrees-of-freedom for each element in the mesh
 
         Returns:
-        edof_mat(nele x 8 int matrix): matrix containing degrees-of-freedom for each
-        element
+        edof_mat(nele x node_ndof int matrix): matrix containing degrees-of-freedom for
+        each element
 
         """
-        edof_mat = np.zeros((self.nele, 8), dtype=int)
-        edof_mat[:, 0:8:2] = self.IX * 2
-        edof_mat[:, 1:8:2] = self.IX * 2 + 1
+        edof_mat = np.zeros((self.nele, 4 * self.node_ndof), dtype=int)
+        if self.node_ndof == 1:
+            edof_mat = self.IX.copy()
+        elif self.node_ndof == 2:
+            edof_mat[:, 0:8:2] = self.IX * 2
+            edof_mat[:, 1:8:2] = self.IX * 2 + 1
 
         return edof_mat
 
-    def grad_shape_func(self, xi: float, eta: float) -> np.ndarray:
+    def grad_shape_func_2d(self, xi: float, eta: float) -> np.ndarray:
         """Function for evaluation the differentiated rectangular shape function at a
         given point xi, eta
 
@@ -96,6 +105,7 @@ class QuadMesh:
         dN_mat (4x8 float matrix): differentiated shape function matrix
 
         """
+        assert self.node_ndof == 2
         # Differentiated shape function values
         dN_xi = 1 / 4 * np.array([-(1 - eta), (1 - eta), (1 + eta), -(1 + eta)])
         dN_eta = 1 / 4 * np.array([-(1 - xi), -(1 + xi), (1 + xi), (1 - xi)])
@@ -119,49 +129,50 @@ class QuadMesh:
         node(int): node index
 
         """
-        return np.floor(dof / 2).astype(int)
+        return np.floor(dof / self.node_ndof).astype(int)
 
 
-class LinearElasticity:
-    """Class for storing functions and attributes related to solving linear elasticity
-    problems
+class FiniteElementSolver(ABC):
+    """Abstract base class for finite element solvers
 
     Attributes:
     self.mesh(object): finite element mesh object
-    self.poisson_ratio(float): poisson ratio of the desired material
-    self.youngs_modulus(float): youngs modulus of the desired material
-    self.Emin(float): minimum value of youngs modulus, used for computational stability
-    self.Emax(float): maximum value of youngs modulus, used for computational stability
-    self.penal(float): stiffness penalty parameter for intermediate material densities
+    self.solver(str): solver type
+    self.Emin(float): material property of void material
+    self.Emax(float): material property of solid material
     self.fixed_dofs(Nx1 int array): fixed degrees-of-freedom
     self.load(ndofx1 int array): load vector
-    self.stiffness_matrix(ndof x ndof float matrix): stiffness matrix (only available
-    after building stiffness matrix)
-    self.displacement(ndof x 1 float array): displacement vector (only available
+    self.system_matrix(ndof x ndof float matrix): system matrix (only available
+    after building system matrix)
+    self.solution_vector(ndof x 1 float array): solution vector (only available
     after solving system)
 
     """
 
     def __init__(
         self,
-        mesh: QuadMesh,
+        mesh: QuadMesh2D,
         solver: Literal["dense-direct", "sparse-direct", "mgcg"] = "sparse-direct",
-        poisson_ratio: float = 0.3,
-        youngs_modulus: float = 1.0,
-    ):
+    ) -> None:
         self.mesh = mesh
         self.solver = solver
-        self.poisson_ratio = poisson_ratio
-        self.youngs_modulus = youngs_modulus
-        self.Emin = 1e-9 * self.youngs_modulus
-        self.Emax = self.youngs_modulus
         self.fixed_dofs = []
         self.load = np.zeros(mesh.ndof)
-        self.stiffness_matrix = None
-        self.displacement = None
-        self.Cmat = self.constitutive_stress_matrix()
-        self.B0 = self.strain_displacement_matrix()
-        self.KE = self.element_stiffness_matrix()
+        self.system_matrix = None
+        self.solution_vector = None
+        self.KE = self.element_system_matrix()
+
+        @classmethod
+        @property
+        @abstractmethod
+        def Emin(self):
+            raise NotImplementedError
+
+        @classmethod
+        @property
+        @abstractmethod
+        def Emax(self):
+            raise NotImplementedError
 
         if solver == "mgcg":
             ndof = mesh.ndof
@@ -171,7 +182,7 @@ class LinearElasticity:
                 ndof = SparseMGCG.calc_coarse_level_ndof(mesh.nelx, mesh.nely, n_levels)
 
             if (n_levels - 1) > 0:
-                self.mgcg = SparseMGCG(mesh.nelx, mesh.nely, n_levels=n_levels - 1)
+                self.mgcg = SparseMGCG(mesh, n_levels=n_levels - 1)
             else:
                 raise RuntimeError("Too few elements for multi-grid solver")
 
@@ -180,7 +191,216 @@ class LinearElasticity:
         assert isinstance(arr, np.ndarray)
         assert issubclass(arr.dtype.type, np.integer)
 
-    def element_stiffness_matrix(self) -> np.ndarray:
+    @abstractmethod
+    def element_system_matrix(self):
+        pass
+
+    def assemble_system_matrix(
+        self, rho: np.ndarray, penal: float, sparse: bool = True
+    ) -> np.ndarray:
+        """Assembles the global system matrix from the local element matrices
+
+        Args:
+        rho(nely x nelx float matrix): density matrix
+        penal(float): penalty of intermediate densities
+        sparse(bool): matrix type
+
+        Returns:
+        system_matrix(ndof x ndof float matrix): global system matrix
+
+        """
+        rho = rho.flatten(order="F")
+        n_edf = 4 * self.mesh.node_ndof  # number of element degrees-of-freedom
+        if sparse is False:
+            self.system_matrix = np.zeros((self.mesh.ndof, self.mesh.ndof))
+            mat_idxs = np.indices((n_edf, n_edf))
+            iK = mat_idxs[0].flatten()
+            jK = mat_idxs[1].flatten()
+            # assemble system matrix
+            for ele in range(len(self.mesh.edof_mat)):
+                edof = self.mesh.edof_mat[ele]
+                self.system_matrix[edof[iK], edof[jK]] += (
+                    self.Emin + (rho[ele]) ** penal * (self.Emax - self.Emin)
+                ) * self.KE[iK, jK]
+        elif sparse is True:
+            iK = np.kron(self.mesh.edof_mat, np.ones((n_edf, 1))).flatten()
+            jK = np.kron(self.mesh.edof_mat, np.ones((1, n_edf))).flatten()
+            sK = (
+                (self.KE.flatten()[np.newaxis]).T
+                * (self.Emin + (rho) ** penal * (self.Emax - self.Emin))
+            ).flatten(order="F")
+            self.system_matrix = sp.coo_matrix(
+                (sK, (iK, jK)), shape=(self.mesh.ndof, self.mesh.ndof)
+            ).tocsc()
+
+        return self.system_matrix
+
+    def solve_(self, rho: np.ndarray, penal, unit_load: bool = False) -> np.ndarray:
+        """Solves the linear system A*x=b
+
+        Args:
+        rho(nely x nelx float matrix): density matrix
+        penal(float): penalty of intermediate densities
+        unit_load(bool): normalize load to unit magnitude
+
+        Returns:
+        solution_vector(ndof x 1 float array): solution vector (x)
+
+        """
+
+        # check whether load and boundary conditions have been applied
+        n_loaded_nodes = len(np.nonzero(self.load)[0])
+        if (len(self.fixed_dofs) == 0) or (n_loaded_nodes == 0):
+            raise AttributeError(
+                "Please insert load and boundary conditions before solving the system"
+            )
+
+        # normalize load if flag is true
+        if unit_load is True:
+            load_sum = np.sum(np.abs(self.load))
+            self.load /= load_sum
+
+        if self.solver == "dense-direct":
+            self.assemble_system_matrix(rho, penal, sparse=False)
+            # apply BC using zero-one method
+            self.system_matrix[self.fixed_dofs, :] = 0
+            self.system_matrix[:, self.fixed_dofs] = 0
+            self.system_matrix[self.fixed_dofs, self.fixed_dofs] = 1
+            self.load[self.fixed_dofs] = 0
+            # solve system
+            x = np.linalg.solve(self.system_matrix, self.load)
+        elif self.solver == "sparse-direct":
+            self.assemble_system_matrix(rho, penal, sparse=True)
+            # get free dofs
+            all_dofs = np.arange(self.mesh.ndof)
+            free_dofs = np.setdiff1d(all_dofs, self.fixed_dofs)
+            A_free = self.system_matrix[free_dofs, :][:, free_dofs]
+            # only solve system for free dofs
+            x = np.zeros(self.mesh.ndof)
+            x[free_dofs] = sp.linalg.spsolve(A_free, self.load[free_dofs])
+        elif self.solver == "mgcg":
+            # apply BC using matrix multiplications (multi-grid solver requires true
+            # size of matrices so we cannot only solve for free dofs)
+            self.assemble_system_matrix(rho, penal, sparse=True)
+            null_diag = np.ones(self.mesh.ndof)
+            null_diag[self.fixed_dofs] = 0
+            null_mat = sp.diags(null_diag)
+            eye_mat = sp.eye(self.mesh.ndof)
+            A_sp = null_mat.T.dot(self.system_matrix).dot(null_mat) - (
+                null_mat - eye_mat
+            )
+            x = self.mgcg.solve_(
+                A_sp,
+                self.load,
+                rtol=1e-10,
+                conv_criterion="disp",
+                verbose=False,
+            )
+        else:
+            raise RuntimeError("Solver not recognized")
+
+        # store solution vector for later use (strain energy, stresses etc.)
+        self.solution_vector = x.copy()
+
+        return x
+
+    def insert_node_boundaries(self, node_ids: np.ndarray, axis: int) -> None:
+        """Modifies the fixed_dofs vector to incorporate new point boundary condition(s)
+
+        Args:
+        node_ids(np.array): integer array with node ids
+        axis(int): direction along which the boundary condition is enforced
+
+        """
+        self.is_integer_np_array(node_ids)
+        assert axis < self.mesh.node_ndof
+
+        if self.mesh.node_ndof == 1:
+            bound_dofs = node_ids
+        elif self.mesh.node_ndof == 2:
+            bound_dofs = node_ids * 2 + (1 * axis)
+        self.fixed_dofs = np.union1d(self.fixed_dofs, bound_dofs).astype(int)
+
+    def insert_node_loads(self, node_ids: int, load_mag: Tuple[float]) -> None:
+        """Modifies the load vector to incorporate a new point load
+
+        Args:
+        node_ids(np.array): integer array with node ids
+        load_mag(tuple of floats): load magnitude in each node degree of freedom
+
+        """
+        self.is_integer_np_array(node_ids)
+        assert len(load_mag) == self.mesh.node_ndof
+
+        if self.mesh.node_ndof == 1:
+            self.load[node_ids] += load_mag[0]
+        elif self.mesh.node_ndof == 2:
+            self.load[node_ids * 2] += load_mag[0]
+            self.load[node_ids * 2 + 1] += load_mag[1]
+
+
+class HeatConduction(FiniteElementSolver):
+    """Class for storing functions and attributes related to solving heat conduction
+    problems
+
+    Attributes:
+    self.conductive_const(float): conductivity of the solid material
+
+    """
+
+    def __init__(self, conductive_const: float = 1.0, **kwargs) -> None:
+        self.conductive_const = conductive_const
+        self.Emin = 0.001 * self.conductive_const
+        self.Emax = 0.999 * self.conductive_const
+        super().__init__(**kwargs)
+
+    def element_system_matrix(self) -> np.ndarray:
+        """Function for creating the analytical element matrix for heat conduction
+
+        Returns:
+        KE(4x4 float matrix): element matrix
+
+        """
+
+        KE = np.array(
+            [
+                [2 / 3, -1 / 6, -1 / 3, -1 / 6],
+                [-1 / 6, 2 / 3, -1 / 6, -1 / 3],
+                [-1 / 3, -1 / 6, 2 / 3, -1 / 6],
+                [-1 / 6, -1 / 3, -1 / 6, 2 / 3],
+            ]
+        )
+
+        return KE
+
+
+class LinearElasticity(FiniteElementSolver):
+    """Class for storing functions and attributes related to solving linear elasticity
+    problems
+
+    Attributes:
+    self.poisson_ratio(float): poisson ratio of the desired material
+    self.youngs_modulus(float): youngs modulus of the desired material
+
+    """
+
+    def __init__(
+        self, poisson_ratio: float = 0.3, youngs_modulus: float = 1.0, **kwargs
+    ):
+        self.poisson_ratio = poisson_ratio
+        self.youngs_modulus = youngs_modulus
+        self.Emin = 1e-9 * self.youngs_modulus
+        self.Emax = self.youngs_modulus
+        super().__init__(**kwargs)
+        self.Cmat = self.constitutive_stress_matrix()
+        self.B0 = self.strain_displacement_matrix()
+
+    @staticmethod
+    def is_integer_np_array(arr):
+        assert isinstance(arr, np.ndarray)
+        assert issubclass(arr.dtype.type, np.integer)
+
+    def element_system_matrix(self) -> np.ndarray:
         """Function for creating the analytical element stiffness matrix
 
         Returns:
@@ -231,7 +451,7 @@ class LinearElasticity:
         xi = 0
         eta = 0
         # differentiated shape functions evaluated in (xi,eta)
-        dN_mat = self.mesh.grad_shape_func(xi, eta)
+        dN_mat = self.mesh.grad_shape_func_2d(xi, eta)
         # mapping back to global coordinates
         jac = np.array([[0.5, 0], [0, 0.5]])
         detJ = np.linalg.det(jac)
@@ -262,143 +482,6 @@ class LinearElasticity:
         )
         Cmat *= self.youngs_modulus / (1 - self.poisson_ratio**2)
         return Cmat
-
-    def stiffness_matrix_assembly(
-        self, rho: np.ndarray, penal: float, sparse: bool = True
-    ) -> np.ndarray:
-        """Assembles the global stiffness from the local element matrices
-
-        Args:
-        rho(nely x nelx float matrix): density matrix
-        penal(float): penalty of intermediate densities
-        sparse(bool): matrix type
-
-        Returns:
-        stiffness_matrix(ndof x ndof float matrix): global stiffness matrix
-
-        """
-        rho = rho.flatten(order="F")
-        if sparse is False:
-            self.stiffness_matrix = np.zeros((self.mesh.ndof, self.mesh.ndof))
-            mat_idxs = np.indices((8, 8))
-            iK = mat_idxs[0].flatten()
-            jK = mat_idxs[1].flatten()
-            # assemble stiffness matrix
-            for ele in range(len(self.mesh.edof_mat)):
-                edof = self.mesh.edof_mat[ele]
-                self.stiffness_matrix[edof[iK], edof[jK]] += (
-                    self.Emin + (rho[ele]) ** penal * (self.Emax - self.Emin)
-                ) * self.KE[iK, jK]
-        elif sparse is True:
-            iK = np.kron(self.mesh.edof_mat, np.ones((8, 1))).flatten()
-            jK = np.kron(self.mesh.edof_mat, np.ones((1, 8))).flatten()
-            sK = (
-                (self.KE.flatten()[np.newaxis]).T
-                * (self.Emin + (rho) ** penal * (self.Emax - self.Emin))
-            ).flatten(order="F")
-            self.stiffness_matrix = sp.coo_matrix(
-                (sK, (iK, jK)), shape=(self.mesh.ndof, self.mesh.ndof)
-            ).tocsc()
-
-        return self.stiffness_matrix
-
-    def solve_(self, rho: np.ndarray, penal, unit_load: bool = False) -> np.ndarray:
-        """Solves the linear system Ku=F
-
-        Args:
-        rho(nely x nelx float matrix): density matrix
-        penal(float): penalty of intermediate densities
-        unit_load(bool): normalize load to unit magnitude
-
-        Returns:
-        disp(ndof x 1 float array): displacement vector
-
-        """
-
-        # check whether load and boundary conditions have been applied
-        n_loaded_nodes = len(np.nonzero(self.load)[0])
-        if (len(self.fixed_dofs) == 0) or (n_loaded_nodes == 0):
-            raise AttributeError(
-                "Please insert load and boundary conditions before solving the system"
-            )
-
-        # normalize load if flag is true
-        if unit_load is True:
-            load_sum = np.sum(np.abs(self.load))
-            self.load /= load_sum
-
-        # assemble the stiffness matrix
-        if self.solver == "dense-direct":
-            self.stiffness_matrix_assembly(rho, penal, sparse=False)
-            # apply BC using zero-one method
-            self.stiffness_matrix[self.fixed_dofs, :] = 0
-            self.stiffness_matrix[:, self.fixed_dofs] = 0
-            self.stiffness_matrix[self.fixed_dofs, self.fixed_dofs] = 1
-            self.load[self.fixed_dofs] = 0
-            # solve system
-            disp = np.linalg.solve(self.stiffness_matrix, self.load)
-        elif self.solver == "sparse-direct":
-            self.stiffness_matrix_assembly(rho, penal, sparse=True)
-            # get free dofs
-            all_dofs = np.arange(2 * (self.mesh.nelx + 1) * (self.mesh.nely + 1))
-            free_dofs = np.setdiff1d(all_dofs, self.fixed_dofs)
-            K_free = self.stiffness_matrix[free_dofs, :][:, free_dofs]
-            # only solve system for free dofs
-            disp = np.zeros(self.mesh.ndof)
-            disp[free_dofs] = sp.linalg.spsolve(K_free, self.load[free_dofs])
-        elif self.solver == "mgcg":
-            # apply BC using matrix multiplications (multi-grid solver requires true
-            # size of matrices so we cannot only solve for free dofs)
-            self.stiffness_matrix_assembly(rho, penal, sparse=True)
-            null_diag = np.ones(self.mesh.ndof)
-            null_diag[self.fixed_dofs] = 0
-            null_mat = sp.diags(null_diag)
-            eye_mat = sp.eye(self.mesh.ndof)
-            K_stiff = null_mat.T.dot(self.stiffness_matrix).dot(null_mat) - (
-                null_mat - eye_mat
-            )
-            disp = self.mgcg.solve_(
-                K_stiff,
-                self.load,
-                rtol=1e-6,
-                conv_criterion="comp",
-                verbose=False,
-            )
-        else:
-            raise RuntimeError("Solver not recognized")
-
-        # store displacement vector for later use (strain energy, stresses etc.)
-        self.displacement = disp.copy()
-
-        return disp
-
-    def insert_node_boundaries(self, node_ids: np.ndarray, axis: int) -> None:
-        """Modifies the fixed_dofs vector to incorporate new point boundary condition(s)
-
-        Args:
-        node_ids(np.array): integer array with node ids
-        axis(int): direction along which the boundary condition is enforced
-
-        """
-        self.is_integer_np_array(node_ids)
-        assert axis < 2
-
-        bound_dofs = node_ids * 2 + (1 * axis)
-        self.fixed_dofs = np.union1d(self.fixed_dofs, bound_dofs).astype(int)
-
-    def insert_node_load(self, node_id: int, load_vec: tuple) -> None:
-        """Modifies the load vector to incorporate a new point load
-
-        Args:
-        node_id(int): node in which the load is applied
-        load_vec(tuple): load magnitude in x and y direction
-
-        """
-        assert type(node_id) == int
-        assert len(load_vec) == 2
-
-        self.load[node_id * 2] += load_vec[0]
-        self.load[node_id * 2 + 1] += load_vec[1]
 
     def pre_integrated_face_force_vectors(self) -> np.ndarray:
         """Function for creating the pre-integrated force vectors for loading of
@@ -486,43 +569,45 @@ class LinearElasticity:
         return ele_force_vecs
 
     def insert_face_forces(
-        self, ele_ids: np.ndarray, ele_face: int, load_vec: tuple
+        self, ele_ids: np.ndarray, ele_face: int, load_mag: Tuple[float]
     ) -> None:
         """
-        Given a set of element ids add a force specified by 'load_vec' to the specifed
+        Given a set of element ids add a force specified by 'load_mag' to the specifed
         'ele_face' for each element
 
         Args:
         ele_ids(integer array): array of element ids for which a face force is applied
         ele_face(int): integer indicating which face the load is applied to
-        load_vec(tuple): load magnitude in x and y direction
+        load_mag(tuple of floats): load magnitude in x and y direction
 
         """
         self.is_integer_np_array(ele_ids)
         assert ele_face < 4
-        assert len(load_vec) == 2
+        assert len(load_mag) == 2
 
         face_force_vecs = self.pre_integrated_face_force_vectors()
         f0x_face, f0y_face = face_force_vecs[ele_face * 2 : (ele_face + 1) * 2]
-        fvec = f0x_face * load_vec[0] + f0y_face * load_vec[1]
+        fvec = f0x_face * load_mag[0] + f0y_face * load_mag[1]
         load_dofs = self.mesh.edof_mat[ele_ids].flatten()
         self.load[load_dofs] += np.tile(fvec, len(ele_ids))
 
-    def insert_element_forces(self, ele_ids: np.ndarray, load_vec: tuple) -> None:
+    def insert_element_forces(
+        self, ele_ids: np.ndarray, load_mag: Tuple[float]
+    ) -> None:
         """
-        Given a set of element ids add a force specified by 'load_vec' to the specifed
+        Given a set of element ids add a force specified by 'load_mag' to the specifed
         element for each element
 
         Args:
         ele_ids(int array): array of element ids for which an element force is applied
-        load_vec(tuple): load magnitude in x and y direction
+        load_mag(tuple of floats): load magnitude in x and y direction
 
         """
         self.is_integer_np_array(ele_ids)
-        assert len(load_vec) == 2
+        assert len(load_mag) == 2
 
         f0x_element, f0y_element = self.pre_integrated_element_force_vectors()
-        fvec = f0x_element * load_vec[0] + f0y_element * load_vec[1]
+        fvec = f0x_element * load_mag[0] + f0y_element * load_mag[1]
         load_dofs = self.mesh.edof_mat[ele_ids].flatten()
         self.load[load_dofs] += np.tile(fvec, len(ele_ids))
 
@@ -538,10 +623,10 @@ class LinearElasticity:
 
         """
 
-        if sp.issparse(self.stiffness_matrix) == True:
-            compliance = self.stiffness_matrix.dot(disp).dot(disp)
+        if sp.issparse(self.system_matrix) is True:
+            compliance = self.system_matrix.dot(disp).dot(disp)
         else:
-            compliance = (disp @ self.stiffness_matrix) @ disp
+            compliance = (disp @ self.system_matrix) @ disp
         return compliance.item()
 
     def compute_element_strains(self, disp: np.ndarray) -> np.ndarray:
@@ -649,7 +734,7 @@ class LinearElasticity:
 
 
 def sparse_restriction_matrix(
-    nelx_f: int, nely_f: int, reduction_factor: int = 2
+    nelx_f: int, nely_f: int, node_ndof: int, reduction_factor: int = 2
 ) -> sp.csr_matrix:
     """Sparse restriction/prolongation (i.e. transposed restriction) matrix used to map
     between different levels in the multi-grid methods
@@ -663,10 +748,12 @@ def sparse_restriction_matrix(
     P(ndof_f x ndof_c sparse float matrix): restriction matrix
 
     """
+    assert node_ndof <= 2
+
     nelx_c = nelx_f // reduction_factor
     nely_c = nely_f // reduction_factor
-    ndof_f = 2 * (nelx_f + 1) * (nely_f + 1)
-    ndof_c = 2 * (nelx_c + 1) * (nely_c + 1)
+    ndof_f = node_ndof * (nelx_f + 1) * (nely_f + 1)
+    ndof_c = node_ndof * (nelx_c + 1) * (nely_c + 1)
     # since we don't know the number of nnz in advance assign assign a safety factor
     nnz_safety_factor = 20
     max_nnz = nelx_c * nely_c * nnz_safety_factor
@@ -693,14 +780,20 @@ def sparse_restriction_matrix(
                 for y_idx in range(y_st_idx, y_end_idx + 1):
                     row = x_idx * (nely_f + 1) + y_idx
                     ind = int((nx_f - x_idx) ** 2 + (ny_f - y_idx) ** 2)
-                    nnz_cnt += 1
-                    iP[nnz_cnt] = 2 * row
-                    jP[nnz_cnt] = 2 * col
-                    sP[nnz_cnt] = weights[ind]
-                    nnz_cnt += 1
-                    iP[nnz_cnt] = 2 * row + 1
-                    jP[nnz_cnt] = 2 * col + 1
-                    sP[nnz_cnt] = weights[ind]
+                    if node_ndof == 1:
+                        nnz_cnt += 1
+                        iP[nnz_cnt] = row
+                        jP[nnz_cnt] = col
+                        sP[nnz_cnt] = weights[ind]
+                    elif node_ndof == 2:
+                        nnz_cnt += 1
+                        iP[nnz_cnt] = 2 * row
+                        jP[nnz_cnt] = 2 * col
+                        sP[nnz_cnt] = weights[ind]
+                        nnz_cnt += 1
+                        iP[nnz_cnt] = 2 * row + 1
+                        jP[nnz_cnt] = 2 * col + 1
+                        sP[nnz_cnt] = weights[ind]
 
     P = sp.coo_matrix(
         (sP[: nnz_cnt + 1], (iP[: nnz_cnt + 1], jP[: nnz_cnt + 1])),
@@ -721,14 +814,14 @@ class SparseMGCG:
     to the next
     """
 
-    def __init__(self, nelx: int, nely: int, n_levels: int, n_jac: int = 2) -> None:
+    def __init__(self, mesh: QuadMesh2D, n_levels: int, n_jac: int = 2) -> None:
         assert n_levels > 0
 
         self.n_levels = n_levels
         self.omega = 0.8
         self.n_jac = n_jac
         # degrees of freedom at coarsest level
-        ndof_c = self.calc_coarse_level_ndof(nelx, nely, n_levels)
+        ndof_c = self.calc_coarse_level_ndof(mesh.nelx, mesh.nely, n_levels)
         if ndof_c < 1e3:
             raise RuntimeError(
                 """System size at coarse level too small. Please decrease number of 
@@ -738,9 +831,9 @@ class SparseMGCG:
             print("Preparing restriction matrices")
             self.restriction_mats = []
             for lvl in range(self.n_levels):
-                restr_mat = sparse_restriction_matrix(
-                    nelx // (2**lvl), nely // (2**lvl)
-                )
+                nelx_c = mesh.nelx // (2**lvl)
+                nely_c = mesh.nely // (2**lvl)
+                restr_mat = sparse_restriction_matrix(nelx_c, nely_c, mesh.node_ndof)
                 self.restriction_mats.append(restr_mat.tocsr())
 
     @staticmethod
@@ -793,7 +886,8 @@ class SparseMGCG:
         # if at last level solve system using direct solver
         if level + 1 == self.n_levels:
             x = factor(d_r)
-        else:  # else move to next level
+        # else move to next level
+        else:
             x = self.Vcycle(A_L, factor, d_r, level + 1)
         x_p = self.restriction_mats[level].dot(x)  # prolong
         z += x_p
@@ -805,8 +899,8 @@ class SparseMGCG:
         A: sp.csc_matrix,
         b: np.ndarray,
         max_iter: int = 100,
-        rtol: float = 1e-10,
-        conv_criterion: str = "disp",
+        rtol: float = 1e-6,
+        conv_criterion: str = "comp",
         verbose: bool = False,
     ) -> np.ndarray:
         """Solve sparse system A*x=b using multi-grid preconditioned conjugate gradient
