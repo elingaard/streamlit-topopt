@@ -17,7 +17,7 @@ with st.spinner("Installing packages..."):
         subprocess.call([f"{sys.executable} setup.py install"], shell=True)
     finally:
         reload(site)  # force reload of sys.path
-        from st_topopt.FEA import QuadMesh, LinearElasticity
+        from st_topopt.FEA import QuadMesh2D, LinearElasticity, HeatConduction
         from st_topopt import benchmarks
         from st_topopt.utils import PillowGIFWriter, matshow_to_image_buffer
         from st_topopt.topopt import (
@@ -52,7 +52,7 @@ def fea_parameter_selector():
             help="""It is recommened to use the direct solver for smaller problems and 
             the iterative solver for larger problems""",
         )
-        problem_options = ["MBB", "Bridge", "Cantilever", "Caramel"]
+        problem_options = ["MBB", "Bridge", "Cantilever", "Caramel", "Heat sink"]
         problem = c4.selectbox(
             "Problem",
             options=problem_options,
@@ -261,8 +261,12 @@ def app():
         nelx, nely, solver, problem = fea_parameter_selector()
 
     if "mesh" not in st.session_state or "fea" not in st.session_state:
-        mesh = QuadMesh(nelx, nely)
-        fea = LinearElasticity(mesh, solver=solver)
+        if problem != "Heat sink":
+            mesh = QuadMesh2D(nelx, nely, node_ndof=2)
+            fea = LinearElasticity(mesh=mesh, solver=solver)
+        else:
+            mesh = QuadMesh2D(nelx, nely, node_ndof=1)
+            fea = HeatConduction(mesh=mesh, solver=solver)
         if problem == "MBB":
             benchmarks.init_MBB_beam(mesh, fea)
         elif problem == "Bridge":
@@ -271,6 +275,8 @@ def app():
             benchmarks.init_cantilever_beam(mesh, fea)
         elif problem == "Caramel":
             benchmarks.init_caramel(mesh, fea)
+        elif problem == "Heat sink":
+            benchmarks.init_heat_sink(mesh, fea)
         st.session_state["mesh"] = mesh
         st.session_state["fea"] = fea
         st.session_state.gif_writer.reset_()
@@ -311,15 +317,18 @@ def app():
         )
 
         if analysis_type == "Strain energy" or analysis_type == "Von Mises":
-            disp = st.session_state.topopt.fea.displacement
-            dens_mask = st.session_state.topopt.rho_phys < 0.1
-            if analysis_type == "Strain energy":
-                field_mat = st.session_state.fea.compute_strain_energy(disp)
-            elif analysis_type == "Von Mises":
-                field_mat = st.session_state.fea.compute_von_mises_stresses(disp)
-            field_mat[dens_mask] = np.nan
-            img_buf = matshow_to_image_buffer(field_mat, display_cmap=True)
-            st.image(img_buf, caption=analysis_type)
+            try:
+                disp = st.session_state.topopt.fea.solution_vector
+                dens_mask = st.session_state.topopt.rho_phys < 0.1
+                if analysis_type == "Strain energy":
+                    field_mat = st.session_state.fea.compute_strain_energy(disp)
+                elif analysis_type == "Von Mises":
+                    field_mat = st.session_state.fea.compute_von_mises_stresses(disp)
+                field_mat[dens_mask] = np.nan
+                img_buf = matshow_to_image_buffer(field_mat, display_cmap=True)
+                st.image(img_buf, caption=analysis_type)
+            except AttributeError:
+                st.info("Not applicable for this problem")
 
         elif analysis_type == "Log metrics":
             logger = st.session_state.topopt.logger
