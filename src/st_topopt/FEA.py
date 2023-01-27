@@ -1,7 +1,8 @@
-from typing import Tuple, List, Literal
+from typing import Tuple, List, Literal, Union
 from abc import ABC, abstractmethod
 
 import numpy as np
+import numpy.typing as npt
 import scipy.sparse as sp
 
 
@@ -56,7 +57,7 @@ class QuadMesh2D:
         self.IX = self.get_connectivity_matrix()
         self.edof_mat = self.get_edof_matrix()
 
-    def get_connectivity_matrix(self) -> np.ndarray:
+    def get_connectivity_matrix(self) -> npt.NDArray[np.int64]:
         """Function for creating the connectivity matrix between elements and
         nodes in the mesh
 
@@ -75,7 +76,7 @@ class QuadMesh2D:
 
         return IX
 
-    def get_edof_matrix(self) -> np.ndarray:
+    def get_edof_matrix(self) -> npt.NDArray[np.int64]:
         """Function for creating the element degrees-of-freedom matrix which
         holds the degrees-of-freedom for each element in the mesh
 
@@ -93,7 +94,7 @@ class QuadMesh2D:
 
         return edof_mat
 
-    def grad_shape_func_2d(self, xi: float, eta: float) -> np.ndarray:
+    def grad_shape_func_2d(self, xi: float, eta: float) -> npt.NDArray[np.float64]:
         """Function for evaluation the differentiated rectangular shape function at a
         given point xi, eta
 
@@ -119,7 +120,9 @@ class QuadMesh2D:
 
         return dN_mat
 
-    def dof2nodeid(self, dof: int) -> int:
+    def dof2nodeid(
+        self, dof: Union[int, npt.NDArray[np.int64]]
+    ) -> Union[int, npt.NDArray[np.int64]]:
         """Function for getting the node associated with a given degree-of-freedom
 
         Args:
@@ -156,19 +159,15 @@ class FiniteElementSolver(ABC):
     ) -> None:
         self.mesh = mesh
         self.solver = solver
-        self.fixed_dofs = []
+        self.fixed_dofs: npt.ArrayLike = []
         self.load = np.zeros(mesh.ndof)
-        self.system_matrix = None
-        self.solution_vector = None
         self.KE = self.element_system_matrix()
 
-        @classmethod
         @property
         @abstractmethod
         def Emin(self):
             raise NotImplementedError
 
-        @classmethod
         @property
         @abstractmethod
         def Emax(self):
@@ -187,7 +186,7 @@ class FiniteElementSolver(ABC):
                 raise RuntimeError("Too few elements for multi-grid solver")
 
     @staticmethod
-    def is_integer_np_array(arr):
+    def is_integer_np_array(arr: npt.NDArray[np.int64]):
         assert isinstance(arr, np.ndarray)
         assert issubclass(arr.dtype.type, np.integer)
 
@@ -195,15 +194,15 @@ class FiniteElementSolver(ABC):
     def element_system_matrix(self):
         pass
 
-    def assemble_system_matrix(
-        self, rho: np.ndarray, penal: float, sparse: bool = True
-    ) -> np.ndarray:
-        """Assembles the global system matrix from the local element matrices
+    def assemble_dense_system_matrix(
+        self, rho: npt.NDArray[np.float64], penal: float
+    ) -> None:
+        """Assembles dense version of the global system matrix from the local element
+        matrices
 
         Args:
         rho(nely x nelx float matrix): density matrix
         penal(float): penalty of intermediate densities
-        sparse(bool): matrix type
 
         Returns:
         system_matrix(ndof x ndof float matrix): global system matrix
@@ -211,31 +210,46 @@ class FiniteElementSolver(ABC):
         """
         rho = rho.flatten(order="F")
         n_edf = 4 * self.mesh.node_ndof  # number of element degrees-of-freedom
-        if sparse is False:
-            self.system_matrix = np.zeros((self.mesh.ndof, self.mesh.ndof))
-            mat_idxs = np.indices((n_edf, n_edf))
-            iK = mat_idxs[0].flatten()
-            jK = mat_idxs[1].flatten()
-            # assemble system matrix
-            for ele in range(len(self.mesh.edof_mat)):
-                edof = self.mesh.edof_mat[ele]
-                self.system_matrix[edof[iK], edof[jK]] += (
-                    self.Emin + (rho[ele]) ** penal * (self.Emax - self.Emin)
-                ) * self.KE[iK, jK]
-        elif sparse is True:
-            iK = np.kron(self.mesh.edof_mat, np.ones((n_edf, 1))).flatten()
-            jK = np.kron(self.mesh.edof_mat, np.ones((1, n_edf))).flatten()
-            sK = (
-                (self.KE.flatten()[np.newaxis]).T
-                * (self.Emin + (rho) ** penal * (self.Emax - self.Emin))
-            ).flatten(order="F")
-            self.system_matrix = sp.coo_matrix(
-                (sK, (iK, jK)), shape=(self.mesh.ndof, self.mesh.ndof)
-            ).tocsc()
+        self.system_matrix = np.zeros((self.mesh.ndof, self.mesh.ndof))
+        mat_idxs = np.indices((n_edf, n_edf))
+        iK = mat_idxs[0].flatten()
+        jK = mat_idxs[1].flatten()
+        # assemble system matrix
+        for ele in range(len(self.mesh.edof_mat)):
+            edof = self.mesh.edof_mat[ele]
+            self.system_matrix[edof[iK], edof[jK]] += (
+                self.Emin + (rho[ele]) ** penal * (self.Emax - self.Emin)
+            ) * self.KE[iK, jK]
 
-        return self.system_matrix
+    def assemble_sparse_system_matrix(
+        self, rho: npt.NDArray[np.float64], penal: float
+    ) -> None:
+        """Assembles sparse version of the global system matrix from the local element
+        matrices
 
-    def solve_(self, rho: np.ndarray, penal, unit_load: bool = False) -> np.ndarray:
+        Args:
+        rho(nely x nelx float matrix): density matrix
+        penal(float): penalty of intermediate densities
+
+        Returns:
+        system_matrix(ndof x ndof float matrix): global system matrix
+
+        """
+        rho = rho.flatten(order="F")
+        n_edf = 4 * self.mesh.node_ndof  # number of element degrees-of-freedom
+        iK = np.kron(self.mesh.edof_mat, np.ones((n_edf, 1))).flatten()
+        jK = np.kron(self.mesh.edof_mat, np.ones((1, n_edf))).flatten()
+        sK = (
+            (self.KE.flatten()[np.newaxis]).T
+            * (self.Emin + (rho) ** penal * (self.Emax - self.Emin))
+        ).flatten(order="F")
+        self.system_matrix = sp.coo_matrix(
+            (sK, (iK, jK)), shape=(self.mesh.ndof, self.mesh.ndof)
+        ).tocsc()
+
+    def solve_(
+        self, rho: npt.NDArray[np.float64], penal: float, unit_load: bool = False
+    ) -> npt.NDArray[np.float64]:
         """Solves the linear system A*x=b
 
         Args:
@@ -261,16 +275,14 @@ class FiniteElementSolver(ABC):
             self.load /= load_sum
 
         if self.solver == "dense-direct":
-            self.assemble_system_matrix(rho, penal, sparse=False)
-            # apply BC using zero-one method
+            self.assemble_dense_system_matrix(rho, penal)
             self.system_matrix[self.fixed_dofs, :] = 0
             self.system_matrix[:, self.fixed_dofs] = 0
             self.system_matrix[self.fixed_dofs, self.fixed_dofs] = 1
             self.load[self.fixed_dofs] = 0
-            # solve system
             x = np.linalg.solve(self.system_matrix, self.load)
         elif self.solver == "sparse-direct":
-            self.assemble_system_matrix(rho, penal, sparse=True)
+            self.assemble_sparse_system_matrix(rho, penal)
             # get free dofs
             all_dofs = np.arange(self.mesh.ndof)
             free_dofs = np.setdiff1d(all_dofs, self.fixed_dofs)
@@ -281,7 +293,7 @@ class FiniteElementSolver(ABC):
         elif self.solver == "mgcg":
             # apply BC using matrix multiplications (multi-grid solver requires true
             # size of matrices so we cannot only solve for free dofs)
-            self.assemble_system_matrix(rho, penal, sparse=True)
+            self.assemble_sparse_system_matrix(rho, penal)
             null_diag = np.ones(self.mesh.ndof)
             null_diag[self.fixed_dofs] = 0
             null_mat = sp.diags(null_diag)
@@ -304,7 +316,9 @@ class FiniteElementSolver(ABC):
 
         return x
 
-    def insert_node_boundaries(self, node_ids: np.ndarray, axis: int) -> None:
+    def insert_node_boundaries(
+        self, node_ids: npt.NDArray[np.int64], axis: int
+    ) -> None:
         """Modifies the fixed_dofs vector to incorporate new point boundary condition(s)
 
         Args:
@@ -321,7 +335,9 @@ class FiniteElementSolver(ABC):
             bound_dofs = node_ids * 2 + (1 * axis)
         self.fixed_dofs = np.union1d(self.fixed_dofs, bound_dofs).astype(int)
 
-    def insert_node_loads(self, node_ids: int, load_mag: Tuple[float]) -> None:
+    def insert_node_loads(
+        self, node_ids: npt.NDArray[np.int64], load_mag: Tuple[float, ...]
+    ) -> None:
         """Modifies the load vector to incorporate a new point load
 
         Args:
@@ -354,7 +370,7 @@ class HeatConduction(FiniteElementSolver):
         self.Emax = 0.999 * self.conductive_const
         super().__init__(**kwargs)
 
-    def element_system_matrix(self) -> np.ndarray:
+    def element_system_matrix(self) -> npt.NDArray[np.float64]:
         """Function for creating the analytical element matrix for heat conduction
 
         Returns:
@@ -395,12 +411,7 @@ class LinearElasticity(FiniteElementSolver):
         self.Cmat = self.constitutive_stress_matrix()
         self.B0 = self.strain_displacement_matrix()
 
-    @staticmethod
-    def is_integer_np_array(arr):
-        assert isinstance(arr, np.ndarray)
-        assert issubclass(arr.dtype.type, np.integer)
-
-    def element_system_matrix(self) -> np.ndarray:
+    def element_system_matrix(self) -> npt.NDArray[np.float64]:
         """Function for creating the analytical element stiffness matrix
 
         Returns:
@@ -436,7 +447,7 @@ class LinearElasticity(FiniteElementSolver):
 
         return ele_stiff_mat
 
-    def strain_displacement_matrix(self) -> np.ndarray:
+    def strain_displacement_matrix(self) -> npt.NDArray[np.float64]:
         """Function for creating strain-displacement matrix based on shape functions
 
         Returns:
@@ -467,7 +478,7 @@ class LinearElasticity(FiniteElementSolver):
 
         return strain_disp_mat
 
-    def constitutive_stress_matrix(self) -> np.ndarray:
+    def constitutive_stress_matrix(self) -> npt.NDArray[np.float64]:
         """Function for creating the constitutive stiffness matrix
 
         Returns:
@@ -483,7 +494,7 @@ class LinearElasticity(FiniteElementSolver):
         Cmat *= self.youngs_modulus / (1 - self.poisson_ratio**2)
         return Cmat
 
-    def pre_integrated_face_force_vectors(self) -> np.ndarray:
+    def pre_integrated_face_force_vectors(self) -> npt.NDArray[np.float64]:
         """Function for creating the pre-integrated force vectors for loading of
         element faces
 
@@ -542,7 +553,7 @@ class LinearElasticity(FiniteElementSolver):
         )
         return face_force_vecs
 
-    def pre_integrated_element_force_vectors(self) -> np.ndarray:
+    def pre_integrated_element_force_vectors(self) -> npt.NDArray[np.float64]:
         """Function for creating the pre-integrated force vectors for loading of
         entire elements
 
@@ -569,7 +580,10 @@ class LinearElasticity(FiniteElementSolver):
         return ele_force_vecs
 
     def insert_face_forces(
-        self, ele_ids: np.ndarray, ele_face: int, load_mag: Tuple[float]
+        self,
+        ele_ids: npt.NDArray[np.int64],
+        ele_face: int,
+        load_mag: Tuple[float, float],
     ) -> None:
         """
         Given a set of element ids add a force specified by 'load_mag' to the specifed
@@ -592,7 +606,7 @@ class LinearElasticity(FiniteElementSolver):
         self.load[load_dofs] += np.tile(fvec, len(ele_ids))
 
     def insert_element_forces(
-        self, ele_ids: np.ndarray, load_mag: Tuple[float]
+        self, ele_ids: np.ndarray, load_mag: Tuple[float, float]
     ) -> None:
         """
         Given a set of element ids add a force specified by 'load_mag' to the specifed
@@ -611,7 +625,7 @@ class LinearElasticity(FiniteElementSolver):
         load_dofs = self.mesh.edof_mat[ele_ids].flatten()
         self.load[load_dofs] += np.tile(fvec, len(ele_ids))
 
-    def compute_compliance(self, disp: np.ndarray) -> float:
+    def compute_compliance(self, disp: npt.NDArray[np.float64]) -> float:
         """Calculates the compliance (U^T*K*U) using the displacement vector from the
         solved system
 
@@ -629,7 +643,9 @@ class LinearElasticity(FiniteElementSolver):
             compliance = (disp @ self.system_matrix) @ disp
         return compliance.item()
 
-    def compute_element_strains(self, disp: np.ndarray) -> np.ndarray:
+    def compute_element_strains(
+        self, disp: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
         """Compute the strain-tensor in each element
 
         Args:
@@ -649,7 +665,9 @@ class LinearElasticity(FiniteElementSolver):
 
         return epsilon_mat
 
-    def compute_element_stresses(self, disp: np.ndarray) -> np.ndarray:
+    def compute_element_stresses(
+        self, disp: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
         """Compute the stress-tensor in each element
 
         Args:
@@ -665,7 +683,9 @@ class LinearElasticity(FiniteElementSolver):
 
         return sigma_mat
 
-    def compute_strain_energy(self, disp: np.ndarray) -> np.ndarray:
+    def compute_strain_energy(
+        self, disp: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
         """Compute the strain-energy in each element
 
         Args:
@@ -686,7 +706,9 @@ class LinearElasticity(FiniteElementSolver):
 
         return strain_density_mat
 
-    def compute_von_mises_stresses(self, disp: np.ndarray) -> np.ndarray:
+    def compute_von_mises_stresses(
+        self, disp: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
         """Compute the von mises stress in each element
 
         Args:
@@ -707,8 +729,13 @@ class LinearElasticity(FiniteElementSolver):
         return sigma_vm
 
     def compute_principal_stresses(
-        self, disp: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        self, disp: npt.NDArray[np.float64]
+    ) -> Tuple[
+        npt.NDArray[np.float64],
+        npt.NDArray[np.float64],
+        npt.NDArray[np.float64],
+        npt.NDArray[np.float64],
+    ]:
         """Compute the principal stresses and direction in each element
 
         Args:
@@ -841,8 +868,8 @@ class SparseMGCG:
         return 2 * (nelx // (2**n_levels) + 1) * (nely // (2**n_levels) + 1)
 
     def jacobi_smooth(
-        self, x: np.ndarray, A: sp.csc_matrix, b: np.ndarray
-    ) -> np.ndarray:
+        self, x: npt.NDArray[np.float64], A: sp.csc_matrix, b: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
         """Function for performing jacobi smoothing
 
         Args:
@@ -863,8 +890,8 @@ class SparseMGCG:
         return x
 
     def Vcycle(
-        self, A_L: List[sp.csc_matrix], factor: object, res: np.ndarray, level: int
-    ) -> np.ndarray:
+        self, A_L: List[sp.csc_matrix], factor, res: npt.NDArray[np.float64], level: int
+    ) -> npt.NDArray[np.float64]:
         """Function for performing one V-cycle iteration, i.e. solve to get a solution
         'x' that minimizes the residual 'res' at the current level
 
@@ -897,12 +924,12 @@ class SparseMGCG:
     def solve_(
         self,
         A: sp.csc_matrix,
-        b: np.ndarray,
+        b: npt.NDArray[np.float64],
         max_iter: int = 100,
         rtol: float = 1e-6,
         conv_criterion: str = "comp",
         verbose: bool = False,
-    ) -> np.ndarray:
+    ) -> npt.NDArray[np.float64]:
         """Solve sparse system A*x=b using multi-grid preconditioned conjugate gradient
         method with compliance or solution convergence criterion
 
