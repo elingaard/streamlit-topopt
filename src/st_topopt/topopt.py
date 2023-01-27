@@ -1,12 +1,16 @@
 from abc import ABC, abstractmethod
-from typing import Tuple
+from typing import Tuple, Any
 from collections import defaultdict
 
 import numpy as np
+import numpy.typing as npt
 from scipy.ndimage import convolve
 
 
-def build_cone_filter(rmin: float, size: tuple) -> Tuple[np.ndarray, np.ndarray]:
+def build_cone_filter(
+    rmin: float, size: Tuple[int, int]
+) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    """Build a 2D cone filter kernel and the corresponding kernel sums"""
     nely, nelx = size
     cone_kernel_1d = np.arange(-np.ceil(rmin) + 1, np.ceil(rmin))
     [dy, dx] = np.meshgrid(cone_kernel_1d, cone_kernel_1d)
@@ -19,7 +23,7 @@ def build_cone_filter(rmin: float, size: tuple) -> Tuple[np.ndarray, np.ndarray]
 
 class MetricLogger:
     def __init__(self) -> None:
-        self.metrics = defaultdict(list)
+        self.metrics: dict = defaultdict(list)
 
     def log_metric(self, key: str, value):
         self.metrics[key].append(value)
@@ -27,7 +31,14 @@ class MetricLogger:
 
 class ComplianceTopOpt(ABC):
     def __init__(
-        self, mesh, fea, volfrac, penal, max_iter, min_change, move_limit
+        self,
+        mesh: Any,
+        fea: Any,
+        volfrac: float,
+        penal: float,
+        max_iter: int,
+        min_change: float,
+        move_limit: float,
     ) -> None:
         self.mesh = mesh
         self.fea = fea
@@ -40,10 +51,22 @@ class ComplianceTopOpt(ABC):
         self.rho = np.ones((self.mesh.nely, self.mesh.nelx)) * self.volfrac
         self.rho_phys = self.rho.copy()
         disp = self.fea.solve_(self.rho_phys, self.penal, unit_load=True)
-        self.comp, _ = self.eval_compliance(disp)
+        self.comp = self.global_compliance(self.elementwise_compliance(disp))
         self.iter = 0
 
-    def elementwise_compliance(self, u):
+    @abstractmethod
+    def design_filter(self, x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        pass
+
+    @abstractmethod
+    def sensitivity_filter(
+        self, dc: npt.NDArray[np.float64], dv: npt.NDArray[np.float64]
+    ) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        pass
+
+    def elementwise_compliance(
+        self, u: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
         ce = np.sum(
             np.matmul(u[self.mesh.edof_mat], self.fea.KE) * u[self.mesh.edof_mat],
             axis=1,
@@ -51,18 +74,19 @@ class ComplianceTopOpt(ABC):
         ce = ce.reshape((self.mesh.nely, self.mesh.nelx), order="F")
         return ce
 
-    def eval_compliance(self, u):
-        ce = self.elementwise_compliance(u)
+    def global_compliance(self, ce: npt.NDArray[np.float64]) -> float:
         comp = np.sum(
             self.fea.Emin + self.rho_phys**2 * (self.fea.Emax - self.fea.Emin) * ce
         )
-        return comp, ce
+        return comp
 
-    def eval_vol_constraint(self):
+    def eval_vol_constraint(self) -> float:
         vol_diff = (np.sum(self.rho_phys) / self.mesh.nele) - self.volfrac
         return vol_diff
 
-    def eval_sensitivities(self, ce):
+    def calc_sensitivities(
+        self, ce: npt.NDArray[np.float64]
+    ) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
         dc = (
             -self.penal
             * (self.fea.Emax - self.fea.Emin)
@@ -73,7 +97,9 @@ class ComplianceTopOpt(ABC):
         dv = np.ones((self.mesh.nely, self.mesh.nelx))
         return dc, dv
 
-    def bisect(self, dc, dv):
+    def bisect(
+        self, dc: npt.NDArray[np.float64], dv: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
         l1 = 1e-9
         l2 = 1e9
         while (l2 - l1) / (l1 + l2) > 1e-3:
@@ -84,7 +110,7 @@ class ComplianceTopOpt(ABC):
                 1.0, np.minimum(self.rho + self.move_limit, self.rho * B_K)
             )
             rho_new = np.maximum(0.0, np.maximum(self.rho - self.move_limit, fixpoint))
-            self.rho_phys = self.apply_design_filter(rho_new)
+            self.rho_phys = self.design_filter(rho_new)
             self.vol_diff = self.eval_vol_constraint()
             if self.vol_diff > 0:
                 l1 = lmid
@@ -93,19 +119,12 @@ class ComplianceTopOpt(ABC):
 
         return rho_new
 
-    @abstractmethod
-    def apply_design_filter(self):
-        pass
-
-    @abstractmethod
-    def apply_sensitivity_filter(self):
-        pass
-
-    def step(self):
+    def step(self) -> None:
         disp = self.fea.solve_(self.rho_phys, self.penal, unit_load=True)
-        comp, ce = self.eval_compliance(disp)
-        dc, dv = self.eval_sensitivities(ce)
-        dc, dv = self.apply_sensitivity_filter(dc, dv)
+        ce = self.elementwise_compliance(disp)
+        comp = self.global_compliance(ce)
+        dc, dv = self.calc_sensitivities(ce)
+        dc, dv = self.sensitivity_filter(dc, dv)
         rho_new = self.bisect(dc, dv)
 
         self.max_rho_change = np.max(np.abs(rho_new - self.rho))
@@ -118,45 +137,49 @@ class ComplianceTopOpt(ABC):
         self.logger.log_metric("max_rho_change", self.max_rho_change)
         self.logger.log_metric("vol_diff", self.vol_diff)
 
-    def run(self):
+    def run(self) -> None:
         self.step()
         while self.max_rho_change > self.min_change and self.iter < self.max_iter:
             self.step()
 
 
 class SensitivityFilterTopOpt(ComplianceTopOpt):
-    def __init__(self, rmin, **kwargs):
+    def __init__(self, rmin: float, **kwargs):
         super().__init__(**kwargs)
         self.rmin = rmin
         self.filter_kernel, self.kernel_sums = build_cone_filter(
             rmin, (self.mesh.nely, self.mesh.nelx)
         )
 
-    def apply_design_filter(self, x):
+    def design_filter(self, x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
         x_phys = x.copy()
         return x_phys
 
-    def apply_sensitivity_filter(self, dc, dv):
+    def sensitivity_filter(
+        self, dc: npt.NDArray[np.float64], dv: npt.NDArray[np.float64]
+    ) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
         dc = convolve(dc * self.rho_phys, self.filter_kernel, mode="constant", cval=0)
         dc = dc / self.kernel_sums / np.maximum(1e-3, self.rho_phys)
         return dc, dv
 
 
 class DensityFilterTopOpt(ComplianceTopOpt):
-    def __init__(self, rmin, **kwargs):
+    def __init__(self, rmin: float, **kwargs):
         super().__init__(**kwargs)
         self.rmin = rmin
         self.filter_kernel, self.kernel_sums = build_cone_filter(
             rmin, (self.mesh.nely, self.mesh.nelx)
         )
 
-    def apply_design_filter(self, x):
+    def design_filter(self, x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
         x_phys = (
             convolve(x, self.filter_kernel, mode="constant", cval=0) / self.kernel_sums
         )
         return x_phys
 
-    def apply_sensitivity_filter(self, dc, dv):
+    def sensitivity_filter(
+        self, dc: npt.NDArray[np.float64], dv: npt.NDArray[np.float64]
+    ) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
         dc = convolve(
             dc / self.kernel_sums, self.filter_kernel, mode="constant", cval=0
         )
@@ -167,7 +190,7 @@ class DensityFilterTopOpt(ComplianceTopOpt):
 
 
 class HeavisideFilterTopOpt(ComplianceTopOpt):
-    def __init__(self, rmin, **kwargs):
+    def __init__(self, rmin: float, **kwargs):
         super().__init__(**kwargs)
         self.rmin = rmin
         self.beta = 1
@@ -182,7 +205,7 @@ class HeavisideFilterTopOpt(ComplianceTopOpt):
         )
         self.iter_beta = 0
 
-    def apply_design_filter(self, x):
+    def design_filter(self, x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
         self.rho_tilde = (
             convolve(x, self.filter_kernel, mode="constant", cval=0) / self.kernel_sums
         )
@@ -193,7 +216,9 @@ class HeavisideFilterTopOpt(ComplianceTopOpt):
         )
         return x_phys
 
-    def apply_sensitivity_filter(self, dc, dv):
+    def sensitivity_filter(
+        self, dc: npt.NDArray[np.float64], dv: npt.NDArray[np.float64]
+    ) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
         dx = self.beta * np.exp(-self.beta * self.rho_tilde) + np.exp(-self.beta)
         dc = convolve(
             (dc * dx) / self.kernel_sums,
@@ -209,7 +234,7 @@ class HeavisideFilterTopOpt(ComplianceTopOpt):
         )
         return dc, dv
 
-    def step(self):
+    def step(self) -> None:
         super().step()
         self.iter_beta += 1
 
