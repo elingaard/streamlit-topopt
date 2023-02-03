@@ -2,7 +2,7 @@ from io import BytesIO
 
 import numpy as np
 import matplotlib.pyplot as plt
-from PIL import Image, ImageDraw, ImageOps
+from PIL import Image, ImageDraw
 
 
 class PillowGIFWriter:
@@ -65,7 +65,7 @@ class PillowGIFWriter:
             save_all=True,
             append_images=self.frames[1:],
             optimize=False,
-            duration=self.fps * 1000,  # ms
+            duration=self.fps / 1000,  # ms
             loop=0,
         )
 

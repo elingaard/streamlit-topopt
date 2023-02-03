@@ -34,20 +34,21 @@ def fea_parameter_selector():
             "Nr. elements in x",
             min_value=1,
             max_value=1000,
-            value=80,
+            value=200,
             help="Number of elements in horizontal direction",
         )
         nely = c2.number_input(
             "Nr. elements in y",
             min_value=1,
             max_value=1000,
-            value=40,
+            value=100,
             help="Number of elements in vertical direction",
         )
         solver_disp_names = {"sparse-direct": "direct", "mgcg": "iterative"}
         solver = c3.selectbox(
             "Solver",
             options=["sparse-direct", "mgcg"],
+            index=1,
             format_func=lambda k: solver_disp_names[k],
             help="""It is recommened to use the direct solver for smaller problems and 
             the iterative solver for larger problems""",
@@ -56,6 +57,7 @@ def fea_parameter_selector():
         problem = c4.selectbox(
             "Problem",
             options=problem_options,
+            index=1,
             help="Choose between the different standard problems visualized above",
         )
 
