@@ -10,7 +10,7 @@ class PillowGIFWriter:
 
     def __init__(self, target_size: int = 800) -> None:
         self.frames = []
-        self.fps = 1
+        self.fps = 2
         self.target_size = target_size
 
     @staticmethod
@@ -65,7 +65,7 @@ class PillowGIFWriter:
             save_all=True,
             append_images=self.frames[1:],
             optimize=False,
-            duration=self.fps * 1000,  # ms
+            duration=self.fps / 1000,  # ms
             loop=0,
         )
 
